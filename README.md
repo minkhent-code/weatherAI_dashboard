@@ -17,10 +17,12 @@ Deep dive: [`how_this_works.md`](how_this_works.md)
 | --- | --- |
 | Default landing view | **3D globe** with bundled forecast data; switch views to open the satellite-radar map |
 | Satellite-radar map | **MapLibre** + Esri World Imagery tiles + heat overlay from selected local Zarr model via Python field API |
-| Zarr variables on that map | `t2m`, `t500`, `msl`, `q850`, `tcwv`, `u10m`, `v10m`, `wind10m` (derived), `u100m`, `v100m`, `z500` |
+| Zarr variables on that map | Each model exposes its own parameters, labels, units, and Burmese translations |
+| WeatherNext2Cyclones | Opens the regular satellite-radar view with animated forecast cyclone tracks |
+| Historical Replay | Myanmar-bounds IBTrACS cyclone tracks plus NOAA ONI El Niño/La Niña context, stored as per-event Zarr under `models/HistoricalEvents/` |
 | 3D globe | Bundled `src/data/forecastData.json` or a dropped Colab FCN zip |
 | City trends | Selected local model's Zarr time series; falls back to bundled/Colab **2 m temperature** + **10 m wind** |
-| Storm / cyclone JSON | Notebook can write `storm_alert.json`; **UI does not show** a cyclone card |
+| Storm / cyclone data | WeatherNext2Cyclones forecast tracker and Myanmar-focused Historical Replay stores; notebook `storm_alert.json` is separate |
 
 Internal research / software showcase. Local forecast skill has **not** been formally validated here.
 
@@ -31,7 +33,7 @@ Internal research / software showcase. Local forecast skill has **not** been for
 | Node.js **20+** | app server + Vite |
 | npm | uses `package-lock.json` |
 | Python **3.11+** | Install `backend/requirements.txt` for the local field API |
-| Forecast stores | put `forecast.zarr/` in the project root for Earth-2, or put additional model stores under `models/<model-id>/` (gitignored — do not commit) |
+| Forecast stores | put supported stores under `models/<model-id>/` (gitignored — do not commit) |
 | Modern browser | WebGL / MapLibre |
 | Network | **satellite-radar** page needs internet for Esri basemap tiles; heat data stays local |
 | GPU Colab/Kaggle (optional) | only to **export a new Colab zip** for the globe and fallback city data |
@@ -41,27 +43,28 @@ Internal research / software showcase. Local forecast skill has **not** been for
 ```bash
 cd Local_NVIDIA_FourCastNet_Myanmar_AI_Weather_Showcase
 
-# 1. Put the Earth-2 store here:
-#    ./forecast.zarr/
-#    Additional model stores can be placed at:
-#    ./models/model1/   (or ./models/model1/forecast.zarr)
-#    ./models/model2/
-#    ./models/model3/
+# Put supported forecast stores in:
+#    ./models/FourCastNet3/forecast.zarr/
+#    ./models/PrecipitationAFNOv2/forecast.zarr/
+#    ./models/Pangu-Weather/forecast.zarr/
+#    ./models/WindGustAFNO/forecast.zarr/
+#    ./models/WeatherNext2Cyclones/forecast.zarr/
 
 python -m venv .venv
 # Windows
 .\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
 # macOS / Linux
 # .venv/bin/python -m pip install -r backend/requirements.txt
+
 npm install
 npm run dev
 ```
 
-The local API uses the repository `.venv` when present.
+Run `.\.venv\Scripts\python.exe backend\model_loaders\historical_events.py all` separately to fetch NOAA data and build event-specific Zarr stores under `models/HistoricalEvents/`. The command prints connection, byte/progress, and processing status, keeps a resumable source archive in `models/HistoricalEvents/downloads/`, and reuses it on later runs. It includes storms whose tracks enter 9–29°N, 92–102°E and all qualifying NOAA ONI episodes as Pacific-scale climate context. The IBTrACS source archive is about 330 MB. The local API reads this catalog and serves the selected Zarr event to the replay UI; click the refresh icon next to the event selector after the script finishes.
 
 Open **http://localhost:5180**
 
-`npm run dev` starts Express + Vite on **5180** and spawns (or reuses) the zarr field API on **8766**. Proxy path: `/api/zarr/*`.
+`npm run dev` starts Express + Vite on **5180** and spawns (or reuses) the zarr field API on **8766**. If an older API occupies that port, it starts the compatible sidecar on another available port. Proxy path: `/api/zarr/*`.
 
 If the map says the zarr API is unavailable:
 
@@ -84,26 +87,28 @@ This **Local_** repo uses port **5180** so it does not collide with the normal (
 
 ```text
 Local_NVIDIA_FourCastNet_Myanmar_AI_Weather_Showcase/
-  forecast.zarr/            local Earth-2 global store (gitignored, multi-GB)
   models/
-    model1/                 additional model stores (same Zarr array layout)
-    model2/
-    model3/
+    FourCastNet3/           global ensemble fields
+    PrecipitationAFNOv2/    six-hour precipitation
+    Pangu-Weather/          pressure-level weather fields
+    WindGustAFNO/            10 m wind gust
+    WeatherNext2Cyclones/   cyclone existence and intensity fields
   server.ts                 Express + Vite; proxies /api/zarr → :8766
   backend/
     zarr_field_server.py    FastAPI model discovery + metadata/field crops
+    model_loaders/          per-model parameters, units, and translations
     fourcastnet_pipeline.py optional automation sketch
   notebook/                 Colab / Kaggle GPU export → forecast .zip
   public/
     forecast_data/          bundled layers, sea-borders.json, configs
     textures/               globe textures (offline)
   src/
-    App.tsx                 views, playback, zip drop
+    App.tsx                 views, historical selection, zip drop
     components/
       ForecastMap2D.tsx     MapLibre satellite-radar page
       SatelliteGlobe3D.tsx  3D globe
       CityForecastPanel.tsx city trends
-      TimelineControls.tsx  0.5x … 10x scrubber
+      TimelineControls.tsx playback and timeline dock
     services/
       zarrApi.ts            client for /api/zarr/meta + /api/zarr/field
       weatherVariables.ts   Colab zip fields (temp + wind)
@@ -115,7 +120,7 @@ Local_NVIDIA_FourCastNet_Myanmar_AI_Weather_Showcase/
 ## Data flow
 
 ```text
-forecast.zarr/ + models/*/  ──►  Python :8766  ──►  /api/zarr/*  ──►  MapLibre heat map
+models/*/  ──►  per-model Python loaders :8766  ──►  /api/zarr/*  ──►  map + cyclone tracker
                                                                       (selected model)
 
 Bundled JSON / Colab zip  ──►  React (globe + city trends: temp + wind)
@@ -123,10 +128,13 @@ Bundled JSON / Colab zip  ──►  React (globe + city trends: temp + wind)
 
 | Mode | What the UI uses |
 | --- | --- |
-| Satellite-radar (default) | Selected local Zarr model via field API — cropped heat JPEG on MapLibre |
+| Satellite-radar (default) | Selected local Zarr model via field API — cropped heat overlay on MapLibre |
+| WeatherNext2Cyclones map | Uses the same satellite-radar view and shared timeline, with animated existence-field forecast tracks, wind and pressure markers |
+| Historical replay | Header selector groups archived events; the bottom playback dock scrubs and plays the selected observations |
+| ENSO ocean map | Highlights the Niño 3.4 area and shows observed area-mean SST, ONI anomaly, and the recent index sequence |
 | Globe | Bundled `forecastData.json` or uploaded Colab zip |
 | City trends | Selected local Zarr model; bundled / uploaded zip as fallback |
-| Model selector | Discovers available stores in `models/`; the selection updates map fields, city time series, and forecast timeline |
+| Model selector | Discovers available forecast stores in `models/`; the separate Historical Replay selector opens archive events |
 | After Colab zip drop | Updates globe/city grids; MapLibre page continues to use the selected local Zarr model |
 
 ## UI features
@@ -135,10 +143,11 @@ Bundled JSON / Colab zip  ──►  React (globe + city trends: temp + wind)
 | --- | --- |
 | Default view | **3D satellite globe** |
 | MapLibre layers | All zarr variables + derived `wind10m`; Burmese chips |
+| Large model catalogs | Parameter chips remain available in a scrollable panel (no dropdown) |
 | Heat overlay | Fixed SE Asia / BoB crop — stays visible while zooming and playing |
 | Zoom | Min ~**4.15**, max **10**; pan limited to the storm-basin box |
 | City pins | MapLibre dots + labels; click to select (no auto city-tour on this page) |
-| Playback | Timeline · `Space` · `←`/`→` · speeds **0.5x … 10x** · `F` fullscreen |
+| Historical replay | Header event selector · bottom playback dock with play/pause and scrubber · `←`/`→` · `F` fullscreen |
 | Time labels | Burmese windows, e.g. `၃-၁၁-၂၀၂၆ (၀၀:၀၀ မှ ၀၆:၀၀)` |
 | City tour | Globe / city-trends only — radar page keeps the selected city fixed |
 | Load Colab zip | Header upload or drag-drop (globe / city data) |
@@ -146,12 +155,14 @@ Bundled JSON / Colab zip  ──►  React (globe + city trends: temp + wind)
 
 ## Local model stores
 
-1. Copy the Earth-2 store to project-root `forecast.zarr/`; add other models under `models/<model-id>/` (or `models/<model-id>/forecast.zarr/`).
-2. The API discovers Earth-2-style stores and Pangu6 stores nested as `models/Pangu6/<store>.zarr/`. Pangu6 stores use root `model`, `initialization_utc`, and `forecast_lead_hours` attributes with global `[time, lead, lat, lon]` arrays.
-3. Keep these large local folders uncommitted; both locations are listed in `.gitignore`.
-4. The field API serves **viewport/region crops** as JSON; the browser never loads the whole store.
+1. Put Zarr stores under `models/<model-id>/` or `models/<model-id>/forecast.zarr/`. Supported Zarr IDs are `FourCastNet3`, `PrecipitationAFNOv2`, `Pangu-Weather`, `WindGustAFNO`, and `WeatherNext2Cyclones`.
+2. Each Zarr model has its own loader under `backend/model_loaders/`. The API reads Zarr v2 or v3 forecast grids in supported lead/time/ensemble layouts.
+3. Run `python backend/model_loaders/historical_events.py all` separately to download NOAA/NCEI IBTrACS v04r01 and NOAA CPC ONI into `models/HistoricalEvents/`. Cyclone events are full observed tracks for storms entering 9–29°N, 92–102°E; event stores are written to `cyclones/<storm-name>--<IBTrACS-SID>.zarr/`. Qualifying ONI episodes are stored separately under `enso/<episode-name>.zarr/`; `catalog.json` indexes both groups. Use `cyclones` or `enso` to update one group. The raw IBTrACS CSV is about 330 MB.
+4. The Historical Replay selector lists those Myanmar-bounds cyclones and all qualifying El Niño/La Niña episodes. Episodes use NOAA's five consecutive overlapping seasons at ONI ≥ +0.5 °C or ≤ −0.5 °C. ONI is a Pacific-wide climate index/context, not Myanmar-local SST, rainfall, or impact observations.
+5. Keep local model data uncommitted; `models/` is listed in `.gitignore`.
+6. The field API serves **viewport/region crops** as JSON; the browser never loads the whole store. WeatherNext2Cyclones links cyclone-existence peaks using predicted motion and speed limits. These are heuristic tracks, not official storm IDs or operational warnings.
 
-Health check: `http://127.0.0.1:8766/api/health`
+Health check: `http://localhost:5180/api/zarr/health`
 
 The optional GFS forecast-generation pipeline has additional, much larger dependencies. Install them only if you use `backend/fourcastnet_pipeline.py`:
 
@@ -209,8 +220,8 @@ The Colab notebook can still write `storm_alert.json` (BoB peak wind ≥ **65 km
 | MapLibre max zoom-out | minZoom **~4.15**, hard maxBounds around that basin |
 | Heat crop (API) | ~Lon **74–116°E**, Lat **0.5–30.5°N** (fixed so play/zoom keep the overlay) |
 | Bundled Colab crop | Lat **9–29°N**, Lon **92–102°E** |
-| Zarr leads | typically **0 … 168** h every 6 h (29 steps) when using `forecast.zarr` |
-| Model fields (MapLibre) | full Earth-2 variable set listed above |
+| Zarr leads | model-specific forecast steps from its local store |
+| Model fields (MapLibre) | output parameters declared by that model's loader |
 | Model fields (globe / city zip) | **2 m temperature**, **10 m wind** only |
 
 ## References

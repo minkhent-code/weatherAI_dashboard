@@ -2,6 +2,7 @@
 
 export type ZarrVarMeta = {
   label: string;
+  label_mm?: string;
   unit: string;
   cmap: string;
   available?: boolean;
@@ -94,7 +95,7 @@ export const ZARR_VAR_LABELS_MM: Record<string, string> = {
   z500: '၅၀၀ hPa လေထုဖိအားအမြင့်',
 };
 
-export async function fetchZarrMeta(modelId = 'earth2', signal?: AbortSignal): Promise<ZarrMeta> {
+export async function fetchZarrMeta(modelId = 'FourCastNet3', signal?: AbortSignal): Promise<ZarrMeta> {
   const params = new URLSearchParams({ model: modelId });
   const res = await fetch(`/api/zarr/meta?${params}`, { signal });
   if (!res.ok) {
@@ -113,7 +114,7 @@ export async function fetchZarrField(opts: {
   signal?: AbortSignal;
 }): Promise<ZarrField> {
   const params = new URLSearchParams({
-    model: opts.modelId ?? 'earth2',
+    model: opts.modelId ?? 'FourCastNet3',
     variable: opts.variable,
     region: 'global',
     lead_hour: String(opts.leadHour),
@@ -143,6 +144,120 @@ export type ZarrTimeseries = {
   series: Record<string, number[]>;
 };
 
+export type CycloneTrackPoint = {
+  lead_hour: number;
+  valid_utc: string;
+  lat: number;
+  lon: number;
+  existence_signal: number;
+  wind_knots: number | null;
+  pressure_hpa: number | null;
+  rmw_nmi: number | null;
+  intensity_label: string;
+};
+
+export type CycloneTrack = {
+  id: string;
+  label: string;
+  points: CycloneTrackPoint[];
+};
+
+export type CycloneTracks = {
+  model: string;
+  model_label?: string;
+  initialization_utc: string;
+  lead_hours: number[];
+  tracks: CycloneTrack[];
+  tracking_method: string;
+  source?: string;
+  source_url?: string;
+};
+
+export type HistoricalEvent = {
+  id: string;
+  name?: string;
+  season?: number;
+  label: string;
+  phase?: 'El Niño' | 'La Niña';
+  start_utc: string;
+  end_utc: string;
+  point_count: number;
+};
+
+export type HistoricalEventCatalog = {
+  cyclones: HistoricalEvent[];
+  enso: HistoricalEvent[];
+  la_nina: HistoricalEvent[];
+  ready?: boolean;
+  message?: string;
+  sources: { cyclones: string; enso: string };
+};
+
+export type EnsoReplay = {
+  model: string;
+  model_label: string;
+  id: string;
+  phase: 'El Niño' | 'La Niña';
+  label: string;
+  start_utc: string;
+  end_utc: string;
+  points: {
+    season: string;
+    year: number;
+    valid_utc: string;
+    sst_c: number;
+    oni_c: number;
+  }[];
+  tracking_method: string;
+  source: string;
+  source_url: string;
+};
+
+async function fetchJson<T>(url: string, label: string, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`${label} ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+export function fetchHistoricalEvents(signal?: AbortSignal): Promise<HistoricalEventCatalog> {
+  return fetchJson('/api/zarr/history/events', 'historical events', signal);
+}
+
+export function fetchHistoricalCyclone(
+  stormId: string,
+  signal?: AbortSignal
+): Promise<CycloneTracks> {
+  return fetchJson(
+    `/api/zarr/history/cyclones/${encodeURIComponent(stormId)}`,
+    'historical cyclone',
+    signal
+  );
+}
+
+export function fetchEnsoReplay(episodeId: string, signal?: AbortSignal): Promise<EnsoReplay> {
+  return fetchJson(
+    `/api/zarr/history/enso/${encodeURIComponent(episodeId)}`,
+    'ENSO replay',
+    signal
+  );
+}
+
+export async function fetchCycloneTracks(
+  modelId = 'WeatherNext2Cyclones',
+  signal?: AbortSignal
+): Promise<CycloneTracks> {
+  const params = new URLSearchParams({ model: modelId });
+  const res = await fetch(`/api/zarr/cyclones/tracks?${params}`, { signal });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`cyclone tracks ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
 /** City point timeseries for one variable across all lead hours */
 export async function fetchZarrTimeseries(opts: {
   modelId?: string;
@@ -155,7 +270,7 @@ export async function fetchZarrTimeseries(opts: {
     .map((p) => `${p.name}:${p.lat}:${p.lon}`)
     .join(';');
   const params = new URLSearchParams({
-    model: opts.modelId ?? 'earth2',
+    model: opts.modelId ?? 'FourCastNet3',
     variable: opts.variable,
     ensemble: opts.ensemble ?? 'mean',
     points,

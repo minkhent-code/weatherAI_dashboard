@@ -10,6 +10,7 @@ import { Compass, Cloud, Flame, RotateCw, ZoomIn, ZoomOut, Maximize2, Minimize2 
 
 interface SatelliteGlobe3DProps {
   dataset: ForecastDataset;
+  modelId: string;
   currentStepIndex: number;
   selectedCity: CityInfo;
   onSelectCity: (city: CityInfo) => void;
@@ -32,6 +33,7 @@ export function latLonToSphere(lat: number, lon: number, radius = 1.8): THREE.Ve
 
 export const SatelliteGlobe3D: React.FC<SatelliteGlobe3DProps> = ({
   dataset,
+  modelId,
   currentStepIndex,
   selectedCity,
   onSelectCity,
@@ -621,7 +623,7 @@ export const SatelliteGlobe3D: React.FC<SatelliteGlobe3DProps> = ({
       {activePopupCity && (
         <CityWeatherPopup3D
           city={activePopupCity}
-          validTimesUtc={dataset.validTimesUtc}
+          modelId={modelId}
           currentStepIndex={currentStepIndex}
           onClose={() => setActivePopupCity(null)}
           onSelectCity={(c) => {

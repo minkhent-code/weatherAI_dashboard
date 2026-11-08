@@ -9,16 +9,27 @@ import { loadCurrentDataset, loadLargeDataset, saveCustomDataset, clearCustomDat
 import { ShowcaseHeader } from './components/ShowcaseHeader';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ForecastMap2D } from './components/ForecastMap2D';
+import { CycloneTrackerMap } from './components/CycloneTrackerMap';
+import { EnsoReplayMap } from './components/EnsoReplayMap';
+import { TimelineControls, type TimelineStep } from './components/TimelineControls';
 import { SatelliteGlobe3D } from './components/SatelliteGlobe3D';
 import { CityForecastPanel } from './components/CityForecastPanel';
-import { TimelineControls } from './components/TimelineControls';
 import { DataIngestModal } from './components/DataIngestModal';
 import { ModelInfoModal } from './components/ModelInfoModal';
 import { BURMESE_STRINGS, formatMyanmarTime } from './utils/burmese';
-import { getStepTimeWindow } from './utils/forecastTime';
 import { Layers } from 'lucide-react';
-import { fetchZarrMeta, fetchZarrModels, type ZarrMeta, type ZarrModel } from './services/zarrApi';
+import {
+  fetchHistoricalEvents,
+  fetchZarrMeta,
+  fetchZarrModels,
+  type CycloneTracks,
+  type EnsoReplay,
+  type HistoricalEventCatalog,
+  type ZarrMeta,
+  type ZarrModel,
+} from './services/zarrApi';
 import { MYANMAR_CITIES } from './data/myanmarCities';
+import { getStepTimeWindow } from './utils/forecastTime';
 
 function createDefaultDataset(): ForecastDataset {
   return {
@@ -91,15 +102,24 @@ export default function App() {
   const [activeLayer, setActiveLayer] = useState<MapLayer>('temperature');
   const [showWindParticles, setShowWindParticles] = useState<boolean>(true);
   const [models, setModels] = useState<ZarrModel[]>([]);
-  const [selectedModelId, setSelectedModelId] = useState('earth2');
+  const [selectedModelId, setSelectedModelId] = useState('FourCastNet3');
   const [activeModelMeta, setActiveModelMeta] = useState<ZarrMeta | null>(null);
+  const [historicalEvents, setHistoricalEvents] = useState<HistoricalEventCatalog>({
+    cyclones: [],
+    enso: [],
+    la_nina: [],
+    sources: { cyclones: '', enso: '' },
+  });
+  const [historicalEventsError, setHistoricalEventsError] = useState('');
+  const [selectedHistoricalEvent, setSelectedHistoricalEvent] = useState('');
+  const [historicalValidTimes, setHistoricalValidTimes] = useState<string[]>([]);
 
   // Active timestep index
   const [currentStepIndex, setCurrentStepIndex] = useState<number>(0);
-  // Start paused so the first zarr field + basemap can paint (autoplay was aborting every fetch)
-  const [isPlaying, setIsPlaying] = useState<boolean>(false);
-  const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
-  const [autoLoop, setAutoLoop] = useState<boolean>(true);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
+  const [autoLoop, setAutoLoop] = useState(true);
+  const currentStepIndexRef = useRef(currentStepIndex);
   const ignoreStoredLoad = useRef(false);
 
   // City names and coordinates are geography; city-trends forecast values come from the selected Zarr model.
@@ -131,6 +151,25 @@ export default function App() {
       });
     return () => controller.abort();
   }, []);
+
+  const refreshHistoricalEvents = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const catalog = await fetchHistoricalEvents(signal);
+      setHistoricalEvents(catalog);
+      setHistoricalEventsError('');
+    } catch (cause: unknown) {
+      if (cause instanceof Error && cause.name === 'AbortError') return;
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setHistoricalEventsError(`Historical replay API unavailable. Restart npm run dev. (${message})`);
+      console.error('Failed to load historical replay catalog', cause);
+    }
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void refreshHistoricalEvents(controller.signal);
+    return () => controller.abort();
+  }, [refreshHistoricalEvents]);
 
   // Sync fullscreen change listener
   useEffect(() => {
@@ -168,56 +207,61 @@ export default function App() {
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (
+        e.target instanceof HTMLInputElement
+        || e.target instanceof HTMLTextAreaElement
+        || e.target instanceof HTMLSelectElement
+        || e.target instanceof HTMLButtonElement
+      ) return;
 
       if (e.key === 'f' || e.key === 'F') {
         toggleFullscreen();
+      } else if (e.key === 'ArrowRight') {
+        const stepCount = selectedHistoricalEvent
+          ? historicalValidTimes.length
+          : dataset.leadHours.length;
+        if (stepCount > 0) setCurrentStepIndex((prev) => (prev + 1) % stepCount);
+      } else if (e.key === 'ArrowLeft') {
+        const stepCount = selectedHistoricalEvent
+          ? historicalValidTimes.length
+          : dataset.leadHours.length;
+        if (stepCount > 0) setCurrentStepIndex((prev) => (prev - 1 + stepCount) % stepCount);
       } else if (e.key === ' ') {
         e.preventDefault();
-        setIsPlaying((p) => !p);
-      } else if (e.key === 'ArrowRight') {
-        setCurrentStepIndex((prev) => (prev + 1) % dataset.leadHours.length);
-      } else if (e.key === 'ArrowLeft') {
-        setCurrentStepIndex((prev) => (prev - 1 + dataset.leadHours.length) % dataset.leadHours.length);
+        setIsPlaying((playing) => !playing);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [toggleFullscreen, dataset.leadHours.length]);
+  }, [toggleFullscreen, dataset.leadHours.length, selectedHistoricalEvent, historicalValidTimes.length]);
 
-  // Playback: step through forecast windows. City tour only on globe / city-trends —
-  // satellite-radar keeps the selected city fixed while the heat map animates.
+  useEffect(() => {
+    currentStepIndexRef.current = currentStepIndex;
+  }, [currentStepIndex]);
+
   useEffect(() => {
     if (!isPlaying) return;
-
-    const intervalMs = Math.round(2600 / playbackSpeed);
-    const stepCount = dataset.leadHours.length;
-    const cities = dataset.cityForecasts;
-    const tourCities = viewMode !== 'satellite_radar';
-
-    const timer = setInterval(() => {
-      setCurrentStepIndex((prev) => {
-        const next = prev + 1;
-        if (next < stepCount) {
-          return next;
-        }
-
-        if (tourCities && cities.length > 0) {
-          setSelectedCity((city) => {
-            const idx = Math.max(
-              0,
-              cities.findIndex((c) => c.name === city.name),
-            );
-            return cities[(idx + 1) % cities.length] ?? city;
-          });
-        }
-
-        return autoLoop || (tourCities && cities.length > 0) ? 0 : prev;
-      });
-    }, intervalMs);
-
-    return () => clearInterval(timer);
-  }, [isPlaying, playbackSpeed, autoLoop, dataset.leadHours.length, dataset.cityForecasts, viewMode]);
+    const stepCount = selectedHistoricalEvent ? historicalValidTimes.length : dataset.leadHours.length;
+    if (stepCount < 2) return;
+    const timer = window.setInterval(() => {
+      const nextIndex = currentStepIndexRef.current + 1;
+      if (nextIndex >= stepCount && !autoLoop) {
+        setIsPlaying(false);
+        return;
+      }
+      const stepIndex = nextIndex >= stepCount ? 0 : nextIndex;
+      currentStepIndexRef.current = stepIndex;
+      setCurrentStepIndex(stepIndex);
+    }, Math.round(2600 / playbackSpeed));
+    return () => window.clearInterval(timer);
+  }, [
+    isPlaying,
+    playbackSpeed,
+    autoLoop,
+    selectedHistoricalEvent,
+    historicalValidTimes.length,
+    dataset.leadHours.length,
+  ]);
 
   // Global Drag and Drop for zip files
   const [isWindowDragging, setIsWindowDragging] = useState<boolean>(false);
@@ -333,7 +377,16 @@ export default function App() {
     setDataset((prev) => applyZarrMeta(prev, meta));
   }, []);
 
+  const handleCycloneTracks = useCallback((tracks: CycloneTracks) => {
+    setHistoricalValidTimes(tracks.tracks[0]?.points.map((point) => point.valid_utc) ?? []);
+  }, []);
+
+  const handleEnsoReplay = useCallback((replay: EnsoReplay) => {
+    setHistoricalValidTimes(replay.points.map((point) => point.valid_utc));
+  }, []);
+
   useEffect(() => {
+    if (selectedHistoricalEvent || selectedModelId === 'CycloneMocha') return;
     if (!models.some((model) => model.id === selectedModelId && model.available)) return;
     const controller = new AbortController();
     fetchZarrMeta(selectedModelId, controller.signal)
@@ -344,31 +397,72 @@ export default function App() {
         }
       });
     return () => controller.abort();
-  }, [models, selectedModelId, handleZarrMeta]);
+  }, [models, selectedModelId, selectedHistoricalEvent, handleZarrMeta]);
 
-  const currentLeadHour = dataset.leadHours[currentStepIndex] ?? 0;
-  const currentWindow =
-    getStepTimeWindow(dataset.validTimesUtc, currentStepIndex)?.label ??
-    '—';
+  const handleSelectHistoricalEvent = useCallback((selection: string) => {
+    setSelectedHistoricalEvent(selection);
+    setHistoricalValidTimes([]);
+    setCurrentStepIndex(0);
+    setIsPlaying(false);
+    if (selection) setViewMode('satellite_radar');
+  }, []);
+
+  const handleViewModeChange = useCallback((mode: ViewMode) => {
+    if (mode !== 'satellite_radar') {
+      setSelectedHistoricalEvent('');
+      setHistoricalValidTimes([]);
+    }
+    setViewMode(mode);
+  }, []);
+
+  const timelineSteps: TimelineStep[] = selectedHistoricalEvent
+    ? historicalValidTimes.map((value) => {
+        const date = new Date(value);
+        const label = new Intl.DateTimeFormat('en', {
+          month: 'short',
+          day: 'numeric',
+          timeZone: 'UTC',
+        }).format(date);
+        const detail = new Intl.DateTimeFormat('en', {
+          hour: '2-digit',
+          minute: '2-digit',
+          timeZone: 'UTC',
+          timeZoneName: 'short',
+        }).format(date);
+        return { label, detail, fullLabel: `${label} · ${detail}` };
+      })
+    : dataset.leadHours.map((hour, index) => {
+        const window = getStepTimeWindow(dataset.validTimesUtc, index);
+        return {
+          label: window?.dateLabel ?? 'Forecast',
+          detail: window?.shortLabel ?? `+${hour}h`,
+          fullLabel: window?.label ?? `Forecast +${hour}h`,
+        };
+      });
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-[#030712] text-white font-burmese select-none">
       {/* Seamless Floating Top Bar Header */}
       <ShowcaseHeader
         viewMode={viewMode}
-        onViewModeChange={setViewMode}
+        onViewModeChange={handleViewModeChange}
         models={models}
         selectedModelId={selectedModelId}
         onSelectModel={(modelId) => {
           setSelectedModelId(modelId);
+          setSelectedHistoricalEvent('');
+          setHistoricalValidTimes([]);
           setCurrentStepIndex(0);
+          setIsPlaying(false);
+          setViewMode('satellite_radar');
         }}
+        historicalEvents={historicalEvents}
+        selectedHistoricalEvent={selectedHistoricalEvent}
+        onSelectHistoricalEvent={handleSelectHistoricalEvent}
+        onRefreshHistoricalEvents={() => void refreshHistoricalEvents()}
+        historicalEventsError={historicalEventsError}
         isFullscreen={isFullscreen}
         onToggleFullscreen={toggleFullscreen}
-        isPlaying={isPlaying}
-        onTogglePlay={() => setIsPlaying((p) => !p)}
-        leadHour={currentLeadHour}
-        validMyanmarTime={currentWindow}
       />
 
       {/* Full-bleed Edge-to-Edge Satellite / Map Viewport (No White Boxes!) */}
@@ -377,6 +471,7 @@ export default function App() {
           <ErrorBoundary>
             <SatelliteGlobe3D
               dataset={dataset}
+              modelId={selectedModelId}
               currentStepIndex={currentStepIndex}
               selectedCity={selectedCity}
               onSelectCity={handleSelectCity}
@@ -387,17 +482,47 @@ export default function App() {
 
         {viewMode === 'satellite_radar' && (
           <ErrorBoundary>
-            <ForecastMap2D
-              dataset={dataset}
-              modelId={selectedModelId}
-              currentStepIndex={currentStepIndex}
-              selectedCity={selectedCity}
-              onSelectCity={handleSelectCity}
-              activeLayer={activeLayer}
-              onLayerChange={setActiveLayer}
-              showWindParticles={showWindParticles}
-              onToggleWindParticles={() => setShowWindParticles((v) => !v)}
-            />
+            {selectedHistoricalEvent.startsWith('cyclone:') ? (
+              <CycloneTrackerMap
+                modelId={
+                  selectedHistoricalEvent.slice('cyclone:'.length) === 'CycloneMocha'
+                    ? 'CycloneMocha'
+                    : `HistoricalCyclone:${selectedHistoricalEvent.slice('cyclone:'.length)}`
+                }
+                currentStepIndex={currentStepIndex}
+                onSelectStepIndex={setCurrentStepIndex}
+                onForecastLoaded={handleCycloneTracks}
+                isPlaying={isPlaying}
+                playbackSpeed={playbackSpeed}
+              />
+            ) : selectedHistoricalEvent.startsWith('enso:') ? (
+              <EnsoReplayMap
+                episodeId={selectedHistoricalEvent.slice('enso:'.length)}
+                currentStepIndex={currentStepIndex}
+                onReplayLoaded={handleEnsoReplay}
+              />
+            ) : selectedModelId === 'WeatherNext2Cyclones' || selectedModelId === 'CycloneMocha' ? (
+              <CycloneTrackerMap
+                modelId={selectedModelId}
+                currentStepIndex={currentStepIndex}
+                onSelectStepIndex={setCurrentStepIndex}
+                onForecastLoaded={handleCycloneTracks}
+                isPlaying={isPlaying}
+                playbackSpeed={playbackSpeed}
+              />
+            ) : (
+              <ForecastMap2D
+                dataset={dataset}
+                modelId={selectedModelId}
+                currentStepIndex={currentStepIndex}
+                selectedCity={selectedCity}
+                onSelectCity={handleSelectCity}
+                activeLayer={activeLayer}
+                onLayerChange={setActiveLayer}
+                showWindParticles={showWindParticles}
+                onToggleWindParticles={() => setShowWindParticles((v) => !v)}
+              />
+            )}
           </ErrorBoundary>
         )}
 
@@ -422,19 +547,18 @@ export default function App() {
         )}
       </main>
 
-      {/* Floating Minimal Glass Timeline Player Dock */}
       <TimelineControls
-        dataset={dataset}
+        title={selectedHistoricalEvent ? 'Historical replay' : 'Forecast timeline'}
+        steps={timelineSteps}
         currentStepIndex={currentStepIndex}
         onSelectStepIndex={setCurrentStepIndex}
         isPlaying={isPlaying}
-        onTogglePlay={() => setIsPlaying((p) => !p)}
+        onTogglePlay={() => setIsPlaying((playing) => !playing)}
         playbackSpeed={playbackSpeed}
         onChangeSpeed={setPlaybackSpeed}
         autoLoop={autoLoop}
-        onToggleAutoLoop={() => setAutoLoop((v) => !v)}
+        onToggleAutoLoop={() => setAutoLoop((loop) => !loop)}
       />
-
 
       {/* Global Drag & Drop Overlay */}
       {isWindowDragging && (

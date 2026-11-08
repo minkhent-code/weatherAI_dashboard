@@ -6,20 +6,29 @@ Serves /api/models, /api/meta, /api/timeseries, and /api/field.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import zarr
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+from model_loaders import MODEL_LOADERS, MODEL_LOADERS_BY_ID
+from model_loaders.mocha_ibtracs import LABEL as MOCHA_LABEL
+from model_loaders.mocha_ibtracs import MODEL_ID as MOCHA_MODEL_ID
+from model_loaders.mocha_ibtracs import TRACK_PATH as MOCHA_TRACK_PATH
+from model_loaders.historical_events import (
+    CATALOG_PATH as HISTORICAL_EVENTS_CATALOG,
+    DATA_DIR as HISTORICAL_EVENTS_DIR,
+    SEASON_MONTH as HISTORICAL_SEASON_MONTH,
+)
+
 # Local_NVIDIA_FourCastNet_Myanmar_AI_Weather_Showcase/
 ROOT = Path(__file__).resolve().parents[1]
-ZARR_PATH = Path(__file__).resolve().parent.parent / "forecast.zarr"
-if not ZARR_PATH.exists():
-    ZARR_PATH = ROOT / "forecast.zarr"
+MOCHA_2023_STORE = ROOT / "models" / "CycloneMocha_2023" / "forecast.zarr"
 
 REGIONS = {
     "global": {
@@ -87,177 +96,7 @@ REGIONS = {
     },
 }
 
-ConvertFn = Callable[[np.ndarray], np.ndarray]
-
-EARTH2_VARS: dict[str, dict[str, Any]] = {
-    "t2m": {
-        "label": "Temperature 2 m",
-        "unit": "°C",
-        "native": "K",
-        "convert": lambda a: a - 273.15,
-        "cmap": "RdYlBu_r",
-        "source": "t2m",
-    },
-    "t500": {
-        "label": "Temperature 500 hPa",
-        "unit": "°C",
-        "native": "K",
-        "convert": lambda a: a - 273.15,
-        "cmap": "RdYlBu_r",
-        "source": "t500",
-    },
-    "msl": {
-        "label": "Mean sea-level pressure",
-        "unit": "hPa",
-        "native": "Pa",
-        "convert": lambda a: a / 100.0,
-        "cmap": "RdYlBu_r",
-        "source": "msl",
-    },
-    "q850": {
-        "label": "Specific humidity 850 hPa",
-        "unit": "g/kg",
-        "native": "kg/kg",
-        "convert": lambda a: a * 1000.0,
-        "cmap": "YlGnBu",
-        "source": "q850",
-    },
-    "tcwv": {
-        "label": "Total column water vapour",
-        "unit": "kg/m²",
-        "native": "kg/m²",
-        "convert": lambda a: a,
-        "cmap": "YlGnBu",
-        "source": "tcwv",
-    },
-    "u10m": {
-        "label": "U-wind 10 m",
-        "unit": "m/s",
-        "native": "m/s",
-        "convert": lambda a: a,
-        "cmap": "RdBu_r",
-        "source": "u10m",
-    },
-    "v10m": {
-        "label": "V-wind 10 m",
-        "unit": "m/s",
-        "native": "m/s",
-        "convert": lambda a: a,
-        "cmap": "RdBu_r",
-        "source": "v10m",
-    },
-    "wind10m": {
-        "label": "Wind speed 10 m",
-        "unit": "m/s",
-        "native": "m/s",
-        "convert": lambda a: a,
-        "cmap": "viridis",
-        "source": "wind10m",
-        "compute": "wind_speed_10m",
-        "note": "Derived as sqrt(u10m² + v10m²)",
-    },
-    "u100m": {
-        "label": "U-wind 100 m",
-        "unit": "m/s",
-        "native": "m/s",
-        "convert": lambda a: a,
-        "cmap": "RdBu_r",
-        "source": "u100m",
-    },
-    "v100m": {
-        "label": "V-wind 100 m",
-        "unit": "m/s",
-        "native": "m/s",
-        "convert": lambda a: a,
-        "cmap": "RdBu_r",
-        "source": "v100m",
-    },
-    "z500": {
-        "label": "Geopotential height 500 hPa",
-        "unit": "m",
-        "native": "m²/s²",
-        "convert": lambda a: a / 9.80665,
-        "cmap": "viridis",
-        "source": "z500",
-        "note": "Converted from geopotential (÷ g)",
-    },
-}
-
-PANGU_VARS: dict[str, dict[str, Any]] = {
-    "t1000": {
-        "label": "Temperature 1000 hPa",
-        "unit": "°C",
-        "native": "K",
-        "convert": lambda a: a - 273.15,
-        "cmap": "RdYlBu_r",
-        "source": "t1000",
-    },
-    "q850": {
-        "label": "Specific humidity 850 hPa",
-        "unit": "g/kg",
-        "native": "kg/kg",
-        "convert": lambda a: a * 1000.0,
-        "cmap": "YlGnBu",
-        "source": "q850",
-    },
-    "u10m": {
-        "label": "U-wind 10 m",
-        "unit": "m/s",
-        "native": "m/s",
-        "convert": lambda a: a,
-        "cmap": "RdBu_r",
-        "source": "u10m",
-    },
-    "v10m": {
-        "label": "V-wind 10 m",
-        "unit": "m/s",
-        "native": "m/s",
-        "convert": lambda a: a,
-        "cmap": "RdBu_r",
-        "source": "v10m",
-    },
-    "wind10m": {
-        "label": "Wind speed 10 m",
-        "unit": "m/s",
-        "native": "m/s",
-        "convert": lambda a: a,
-        "cmap": "viridis",
-        "source": "wind10m",
-        "compute": "wind_speed_10m",
-        "note": "Derived as sqrt(u10m² + v10m²)",
-    },
-    "z500": {
-        "label": "Geopotential height 500 hPa",
-        "unit": "m",
-        "native": "m²/s²",
-        "convert": lambda a: a / 9.80665,
-        "cmap": "viridis",
-        "source": "z500",
-    },
-}
-
-MODELS: dict[str, dict[str, Any]] = {
-    "earth2": {
-        "id": "earth2",
-        "label": "Earth-2 (global ensemble)",
-        "short": "Earth-2",
-        "path": ZARR_PATH,
-        "source_relative": "forecast.zarr",
-        "layout": "ens_time_lead_lat_lon",
-        "ensemble_size": 4,
-        "has_ensemble": True,
-        "reconstruct_lat": None,
-        "default_region": "global",
-        "regions": ["global", "southeast_asia", "bay_of_bengal", "andaman_sea", "myanmar"],
-        "variables": EARTH2_VARS,
-        "absent": [],
-        "notes": [
-            "Global 0.25° Earth-2 ensemble from Local showcase forecast.zarr folder.",
-            "MapLibre page frames SE Asia + Bay of Bengal + Andaman Sea.",
-            "wind10m derived from u10m/v10m; z500 converted geopotential→height.",
-        ],
-    },
-}
+MODELS: dict[str, dict[str, Any]] = {}
 
 
 def _is_pangu_store(path: Path) -> bool:
@@ -285,52 +124,139 @@ def _is_pangu_store(path: Path) -> bool:
         return False
 
 
+def _read_zarr_metadata(path: Path) -> dict[str, Any] | None:
+    for filename in ("zarr.json", ".zarray"):
+        metadata_path = path / filename
+        if not metadata_path.is_file():
+            continue
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        if isinstance(metadata, dict):
+            return metadata
+    return None
+
+
+def _array_shape(path: Path) -> tuple[int, ...] | None:
+    metadata = _read_zarr_metadata(path)
+    shape = metadata.get("shape") if metadata else None
+    if not isinstance(shape, list) or not all(isinstance(size, int) for size in shape):
+        return None
+    return tuple(shape)
+
+
+def _forecast_layout(
+    shape: tuple[int, ...] | None,
+    lead_count: int,
+    lat_count: int,
+    lon_count: int,
+) -> str | None:
+    if not shape or shape[-2:] != (lat_count, lon_count):
+        return None
+    if len(shape) == 3 and shape[0] == lead_count:
+        return "lead_lat_lon"
+    if len(shape) == 4 and shape[:2] == (1, lead_count):
+        return "time_lead_lat_lon"
+    if len(shape) == 5 and shape[1:3] == (1, lead_count):
+        return "ens_time_lead_lat_lon"
+    return None
+
+
+def _forecast_arrays(path: Path) -> dict[str, str]:
+    coord_names = {
+        "lat", "lon", "lead_time", "forecast_hour", "time", "interval_start",
+        "init_time", "ensemble",
+    }
+    lat_shape = _array_shape(path / "lat")
+    lon_shape = _array_shape(path / "lon")
+    lead_path = path / ("forecast_hour" if (path / "forecast_hour").exists() else "lead_time")
+    lead_shape = _array_shape(lead_path)
+    if not lat_shape or not lon_shape or not lead_shape:
+        return {}
+
+    lead_count = lead_shape[0] if lead_shape else 0
+    lat_count = lat_shape[0]
+    lon_count = lon_shape[0]
+    arrays: dict[str, str] = {}
+    for child in path.iterdir():
+        if child.name in coord_names or not child.is_dir():
+            continue
+        layout = _forecast_layout(
+            _array_shape(child), lead_count, lat_count, lon_count
+        )
+        if layout:
+            arrays[child.name] = layout
+    return arrays
+
+
 def _is_zarr_store(path: Path) -> bool:
-    return (path / "t2m" / "zarr.json").is_file() or _is_pangu_store(path)
+    if _is_pangu_store(path):
+        return True
+    root = _read_zarr_metadata(path)
+    if root is None and not (path / ".zgroup").is_file():
+        return False
+    return bool(_forecast_arrays(path))
 
 
 def _discover_models() -> None:
-    """Register supported Zarr stores beneath models/, including nested .zarr stores."""
+    """Load each supported local model through its dedicated model loader."""
     models_dir = ROOT / "models"
     discovered_ids: set[str] = set()
-    template = MODELS["earth2"]
-    if models_dir.is_dir():
-        for folder in sorted(models_dir.iterdir(), key=lambda item: item.name.lower()):
-            if not folder.is_dir():
-                continue
-            candidates = [folder / "forecast.zarr", folder]
-            candidates.extend(sorted(folder.glob("*.zarr"), key=lambda item: item.name.lower()))
-            store = next((candidate for candidate in candidates if _is_zarr_store(candidate)), None)
-            if store is None:
-                continue
+    if not models_dir.is_dir():
+        return
 
-            model_id = folder.name[:-5] if folder.name.lower().endswith(".zarr") else folder.name
-            if not model_id or model_id == "earth2":
-                continue
-            is_pangu = _is_pangu_store(store)
-            label = " ".join(
-                part.capitalize()
-                for part in model_id.replace("_", " ").replace("-", " ").split()
+    for loader in MODEL_LOADERS:
+        model_id = loader.MODEL_ID
+        folder = models_dir / model_id
+        candidates = [folder / "forecast.zarr", folder]
+        candidates.extend(sorted(folder.glob("*.zarr"), key=lambda item: item.name.lower()))
+        store = next((candidate for candidate in candidates if _is_zarr_store(candidate)), None)
+        if store is None:
+            continue
+
+        arrays = _forecast_arrays(store)
+        if not arrays:
+            continue
+        available_variables = {
+            name: config
+            for name, config in loader.VARIABLES.items()
+            if (
+                all(required in arrays for required in config.get("requires", ()))
+                if config.get("requires")
+                else config["source"] in arrays
             )
-            source_relative = store.relative_to(ROOT).as_posix()
-            MODELS[model_id] = {
-                **template,
-                "id": model_id,
-                "label": label,
-                "short": label,
-                "path": store,
-                "source_relative": source_relative,
-                "layout": "time_lead_lat_lon" if is_pangu else template["layout"],
-                "ensemble_size": 1 if is_pangu else template["ensemble_size"],
-                "has_ensemble": False if is_pangu else template["has_ensemble"],
-                "reconstruct_lat": (90.0, -90.0) if is_pangu else template["reconstruct_lat"],
-                "variables": PANGU_VARS if is_pangu else template["variables"],
-                "notes": [f"Local forecast store discovered in {source_relative}."],
-            }
-            discovered_ids.add(model_id)
+        }
+        if not available_variables:
+            continue
+
+        is_pangu = _is_pangu_store(store)
+        layout = "time_lead_lat_lon" if is_pangu else next(iter(arrays.values()))
+        source_relative = store.relative_to(ROOT).as_posix()
+        MODELS[model_id] = {
+            "id": model_id,
+            "label": loader.LABEL,
+            "short": loader.SHORT,
+            "path": store,
+            "source_relative": source_relative,
+            "layout": layout,
+            "ensemble_size": (
+                _array_shape(store / next(iter(arrays)))[0]
+                if layout == "ens_time_lead_lat_lon"
+                else 1
+            ),
+            "has_ensemble": layout == "ens_time_lead_lat_lon",
+            "reconstruct_lat": (90.0, -90.0) if is_pangu else None,
+            "default_region": "global",
+            "regions": ["global"],
+            "variables": available_variables,
+            "absent": sorted(set(loader.VARIABLES) - set(available_variables)),
+            "notes": [f"Loaded with the {loader.MODEL_ID} model adapter."],
+        }
+        discovered_ids.add(model_id)
 
     for model_id, model in list(MODELS.items()):
-        if model["source_relative"].startswith("models/") and model_id not in discovered_ids:
+        if model_id not in discovered_ids:
             del MODELS[model_id]
 
 
@@ -345,8 +271,25 @@ app.add_middleware(
 _cache: dict[str, Any] = {}
 
 
+def _read_local_json(path: Path, dataset_name: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise HTTPException(
+            404,
+            f"{dataset_name} data is not installed. Run "
+            "'python backend/model_loaders/historical_events.py all'.",
+        ) from error
+    except (OSError, json.JSONDecodeError) as error:
+        raise HTTPException(500, f"Could not read {dataset_name} data: {error}") from error
+    if not isinstance(value, dict):
+        raise HTTPException(500, f"{dataset_name} data has an invalid format.")
+    return value
+
+
 def _get_model(model_id: str) -> dict[str, Any]:
-    _discover_models()
+    if model_id not in MODELS:
+        _discover_models()
     if model_id not in MODELS:
         raise HTTPException(404, f"Unknown model: {model_id}")
     model = MODELS[model_id]
@@ -376,9 +319,12 @@ def _open_coords(model_id: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, dat
         return _cache[key]
 
     lon = np.asarray(zarr.open(str(zpath / "lon"), mode="r"), dtype=float)
-    lead = np.asarray(zarr.open(str(zpath / "lead_time"), mode="r"))
+    lead_name = "forecast_hour" if (zpath / "forecast_hour").exists() else "lead_time"
+    lead_array = zarr.open(str(zpath / lead_name), mode="r")
+    lead = np.asarray(lead_array)
     time = np.asarray(zarr.open(str(zpath / "time"), mode="r"))
-    sample = zarr.open(str(zpath / "t2m"), mode="r")
+    sample_source = next(iter(model["variables"].values()))["source"]
+    sample = _open_array(model_id, sample_source)
 
     if model["reconstruct_lat"]:
         north, south = model["reconstruct_lat"]
@@ -386,8 +332,60 @@ def _open_coords(model_id: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, dat
     else:
         lat = np.asarray(zarr.open(str(zpath / "lat"), mode="r"), dtype=float)
 
-    lead_hours = lead.astype("timedelta64[h]").astype(int)
-    init_utc = _decode_init_utc(time, zpath / "time")
+    if np.issubdtype(lead.dtype, np.timedelta64):
+        lead_hours = lead.astype("timedelta64[h]").astype(int)
+    else:
+        units = str(lead_array.attrs.get("units", "")).lower()
+        dtype_hint = str(lead_array.attrs.get("dtype", "")).lower()
+        if lead_name == "forecast_hour" or units.startswith("hour"):
+            lead_hours = np.rint(lead.astype(float)).astype(int)
+        elif units.startswith("minute"):
+            lead_hours = np.rint(lead.astype(float) / 60.0).astype(int)
+        elif units.startswith("second"):
+            lead_hours = np.rint(lead.astype(float) / 3600.0).astype(int)
+        elif units.startswith("day"):
+            lead_hours = np.rint(lead.astype(float) * 24.0).astype(int)
+        elif dtype_hint.startswith("timedelta64[") and dtype_hint.endswith("]"):
+            delta_unit = dtype_hint.split("[", 1)[1][:-1]
+            seconds_per_unit = {
+                "d": 86400.0,
+                "h": 3600.0,
+                "m": 60.0,
+                "s": 1.0,
+                "ms": 0.001,
+                "us": 0.000001,
+                "ns": 0.000000001,
+            }.get(delta_unit)
+            if seconds_per_unit is None:
+                raise HTTPException(500, f"Unsupported forecast lead dtype: {dtype_hint}")
+            lead_hours = np.rint(
+                lead.astype(float) * seconds_per_unit / 3600.0
+            ).astype(int)
+        else:
+            lead_hours = lead.astype("timedelta64[h]").astype(int)
+
+    attrs_path = zpath / ".zattrs"
+    root_metadata = _read_zarr_metadata(zpath)
+    root_attrs: dict[str, Any] = {}
+    if attrs_path.is_file():
+        try:
+            parsed_attrs = json.loads(attrs_path.read_text(encoding="utf-8"))
+            if isinstance(parsed_attrs, dict):
+                root_attrs = parsed_attrs
+        except (OSError, ValueError, TypeError):
+            root_attrs = {}
+    elif root_metadata and isinstance(root_metadata.get("attributes"), dict):
+        root_attrs = root_metadata["attributes"]
+
+    init_value = root_attrs.get("initialization_utc") or root_attrs.get("forecast_reference_time")
+    if init_value:
+        init_utc = datetime.fromisoformat(str(init_value).replace("Z", "+00:00"))
+        if init_utc.tzinfo is None:
+            init_utc = init_utc.replace(tzinfo=timezone.utc)
+        else:
+            init_utc = init_utc.astimezone(timezone.utc)
+    else:
+        init_utc = _decode_init_utc(time, zpath / "time")
     _cache[key] = (lat, lon, lead_hours, init_utc)
     return _cache[key]
 
@@ -433,7 +431,7 @@ def _open_array(model_id: str, name: str):
         path = _get_model(model_id)["path"] / name
         if not path.exists():
             raise HTTPException(404, f"Array not in {model_id}: {name}")
-        if not (path / "zarr.json").exists():
+        if not (path / "zarr.json").exists() and not (path / ".zarray").exists():
             raise HTTPException(404, f"Incomplete zarr array (no metadata): {name}")
         _cache[key] = zarr.open(str(path), mode="r")
     return _cache[key]
@@ -442,11 +440,19 @@ def _open_array(model_id: str, name: str):
 def _array_is_available(model_id: str, name: str) -> bool:
     model = _get_model(model_id)
     path = model["path"] / name
-    if not path.exists() or not (path / "zarr.json").exists():
+    if not path.exists() or not (
+        (path / "zarr.json").exists() or (path / ".zarray").exists()
+    ):
         return False
     try:
         arr = _open_array(model_id, name)
-        expected_dims = 5 if model["layout"] == "ens_time_lead_lat_lon" else 4
+        expected_dims = {
+            "lead_lat_lon": 3,
+            "time_lead_lat_lon": 4,
+            "ens_time_lead_lat_lon": 5,
+        }.get(model["layout"])
+        if expected_dims is None:
+            return False
         return len(arr.shape) == expected_dims and all(size > 0 for size in arr.shape)
     except (OSError, ValueError, TypeError, KeyError):
         return False
@@ -464,10 +470,14 @@ def _slice_2d(model_id: str, source: str, lead_idx: int, ensemble: str) -> np.nd
     arr = _open_array(model_id, source)
     layout = model["layout"]
 
+    if layout == "lead_lat_lon":
+        return np.asarray(arr[lead_idx, :, :], dtype=np.float32)
     if layout == "time_lead_lat_lon":
         return np.asarray(arr[0, lead_idx, :, :], dtype=np.float32)
 
-    # ens_time_lead_lat_lon
+    if layout != "ens_time_lead_lat_lon":
+        raise HTTPException(500, f"Unsupported array layout for {model_id}: {layout}")
+
     if ensemble == "mean":
         acc = np.asarray(arr[0, 0, lead_idx, :, :], dtype=np.float64)
         n = int(arr.shape[0])
@@ -516,11 +526,18 @@ def _read_grid_tile(
     model = _get_model(model_id)
     arr = _open_array(model_id, source)
     layout = model["layout"]
+    if layout == "lead_lat_lon":
+        return np.asarray(
+            arr[lead_idx, row_start:row_end, col_start:col_end],
+            dtype=np.float32,
+        )
     if layout == "time_lead_lat_lon":
         return np.asarray(
             arr[0, lead_idx, row_start:row_end, col_start:col_end],
             dtype=np.float32,
         )
+    if layout != "ens_time_lead_lat_lon":
+        raise HTTPException(500, f"Unsupported array layout for {model_id}: {layout}")
 
     def read_member(member: int) -> np.ndarray:
         return np.asarray(
@@ -589,10 +606,13 @@ def _model_regions(model: dict[str, Any]) -> dict[str, Any]:
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
+    _discover_models()
     return {
-        "ok": ZARR_PATH.exists(),
-        "zarr_path": str(ZARR_PATH),
-        "exists": ZARR_PATH.exists(),
+        "ok": bool(MODELS) or MOCHA_TRACK_PATH.is_file(),
+        "available_models": [
+            *MODELS,
+            *([MOCHA_MODEL_ID] if MOCHA_TRACK_PATH.is_file() else []),
+        ],
     }
 
 
@@ -601,23 +621,33 @@ def list_models() -> dict[str, Any]:
     _discover_models()
     items = []
     for mid, m in MODELS.items():
-        items.append(
-            {
-                "id": mid,
-                "label": m["label"],
-                "short": m["short"],
-                "source_relative": m["source_relative"],
-                "available": _is_zarr_store(Path(m["path"])),
-                "has_ensemble": m["has_ensemble"],
-                "default_region": m["default_region"],
-            }
-        )
-    default_model = next((item["id"] for item in items if item["available"]), "earth2")
+        if not _is_zarr_store(Path(m["path"])):
+            continue
+        items.append({
+            "id": mid,
+            "label": m["label"],
+            "short": m["short"],
+            "source_relative": m["source_relative"],
+            "available": True,
+            "has_ensemble": m["has_ensemble"],
+            "default_region": m["default_region"],
+        })
+    if MOCHA_TRACK_PATH.is_file():
+        items.append({
+            "id": MOCHA_MODEL_ID,
+            "label": MOCHA_LABEL,
+            "short": "Mocha",
+            "source_relative": MOCHA_TRACK_PATH.relative_to(ROOT).as_posix(),
+            "available": True,
+            "has_ensemble": False,
+            "default_region": "global",
+        })
+    default_model = items[0]["id"] if items else ""
     return {"default": default_model, "models": items}
 
 
 @app.get("/api/meta")
-def meta(model: str = Query("earth2")) -> dict[str, Any]:
+def meta(model: str = Query("FourCastNet3")) -> dict[str, Any]:
     m = _get_model(model)
     lat, lon, lead_hours, init_utc = _open_coords(model)
     present_dirs = sorted(d.name for d in Path(m["path"]).iterdir() if d.is_dir())
@@ -635,11 +665,14 @@ def meta(model: str = Query("earth2")) -> dict[str, Any]:
             source = cfg["source"]
             path = Path(m["path"]) / source
             exists = path.exists()
-            has_meta = (path / "zarr.json").exists() if exists else False
+            has_meta = (
+                (path / "zarr.json").exists() or (path / ".zarray").exists()
+            ) if exists else False
             has_data = _array_has_data(model, source) if has_meta else False
 
         status = {
             "label": cfg["label"],
+            "label_mm": cfg["label_mm"],
             "unit": cfg["unit"],
             "native": cfg["native"],
             "source_array": cfg["source"],
@@ -686,6 +719,402 @@ def meta(model: str = Query("earth2")) -> dict[str, Any]:
             }
             for mid, mm in MODELS.items()
         ],
+    }
+
+
+@app.get("/api/cyclones/tracks")
+def cyclone_tracks(model: str = Query("WeatherNext2Cyclones")) -> dict[str, Any]:
+    if model == MOCHA_MODEL_ID:
+        if not MOCHA_TRACK_PATH.is_file():
+            raise HTTPException(
+                404,
+                "Cyclone Mocha data is missing. Run "
+                "'python backend/model_loaders/mocha_ibtracs.py' to download it.",
+            )
+        try:
+            return json.loads(MOCHA_TRACK_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise HTTPException(500, f"Could not read Cyclone Mocha data: {error}") from error
+    if model != "WeatherNext2Cyclones":
+        raise HTTPException(404, "Cyclone tracking is only available for WeatherNext2Cyclones")
+    m = _get_model(model)
+    required_arrays = {
+        "cyclone_exists_gaussian_unit_mode",
+        "cyclone_usa_wind_disc",
+        "cyclone_usa_pres_disc",
+        "cyclone_usa_rmw_disc",
+    }
+    missing_arrays = required_arrays - m["variables"].keys()
+    if missing_arrays:
+        raise HTTPException(
+            404,
+            f"Cyclone tracking arrays unavailable: {', '.join(sorted(missing_arrays))}",
+        )
+
+    cache_key = f"cyclone_tracks:{model}"
+    if cache_key in _cache:
+        return _cache[cache_key]
+
+    lat, lon, lead_hours, init_utc = _open_coords(model)
+    existence = _open_array(model, "cyclone_exists_gaussian_unit_mode")
+    wind = _open_array(model, "cyclone_usa_wind_disc")
+    pressure = _open_array(model, "cyclone_usa_pres_disc")
+    rmw = _open_array(model, "cyclone_usa_rmw_disc")
+
+    loader = MODEL_LOADERS_BY_ID[model]
+    detections = []
+    for index, lead_hour in enumerate(lead_hours):
+        detections.append(loader.detect_frame(
+            existence=np.asarray(existence[index, :, :], dtype=np.float32),
+            wind=np.asarray(wind[index, :, :], dtype=np.float32),
+            pressure=np.asarray(pressure[index, :, :], dtype=np.float32),
+            rmw=np.asarray(rmw[index, :, :], dtype=np.float32),
+            lat=lat,
+            lon=lon,
+            lead_hour=int(lead_hour),
+            initialization_utc=init_utc,
+        ))
+    tracks = loader.link_detections(detections)
+    result = {
+        "model": model,
+        "initialization_utc": init_utc.isoformat(),
+        "lead_hours": [int(hour) for hour in lead_hours],
+        "tracks": tracks,
+        "tracking_method": "Tracks are derived from local maxima in the gridded cyclone-existence field.",
+    }
+    _cache[cache_key] = result
+    return result
+
+
+@app.get("/api/history/events")
+def historical_events() -> dict[str, Any]:
+    try:
+        catalog = json.loads(HISTORICAL_EVENTS_CATALOG.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        catalog = {}
+    except (OSError, json.JSONDecodeError) as error:
+        raise HTTPException(500, f"Could not read historical event catalog: {error}") from error
+    if not isinstance(catalog, dict):
+        raise HTTPException(500, "Historical event catalog has an invalid format.")
+
+    cyclone_events = catalog.get("cyclones", [])
+    enso_episodes = catalog.get("enso", [])
+    la_nina_episodes = catalog.get("la_nina", [])
+    if not all(isinstance(events, list) for events in (cyclone_events, enso_episodes, la_nina_episodes)):
+        raise HTTPException(500, "Historical event catalog has invalid event groups.")
+    if any(
+        not isinstance(event, dict) or not isinstance(event.get("id"), str)
+        or not isinstance(event.get("store"), str)
+        for events in (cyclone_events, enso_episodes, la_nina_episodes)
+        for event in events
+    ):
+        raise HTTPException(500, "Historical event catalog contains an invalid event entry.")
+    mocha_track = _read_mocha_2023_track()
+    if mocha_track and not any(event.get("id") == "CycloneMocha_2023" for event in cyclone_events):
+        mocha_points = mocha_track["tracks"][0]["points"]
+        cyclone_events = [
+            *cyclone_events,
+            {
+                "id": "CycloneMocha_2023",
+                "name": "Cyclone Mocha",
+                "season": 2023,
+                "label": "Cyclone Mocha (2023)",
+                "start_utc": mocha_points[0]["valid_utc"],
+                "end_utc": mocha_points[-1]["valid_utc"],
+                "point_count": len(mocha_points),
+                "source": "models/CycloneMocha_2023/forecast.zarr",
+            },
+        ]
+    sources = catalog.get("sources", {})
+    if not isinstance(sources, dict):
+        sources = {}
+    return {
+        "cyclones": cyclone_events,
+        "enso": enso_episodes,
+        "la_nina": la_nina_episodes,
+        "ready": bool(cyclone_events or enso_episodes or la_nina_episodes),
+        "message": "" if catalog else (
+            "Cyclone Mocha is loaded from models/CycloneMocha_2023; run "
+            "'python backend/model_loaders/historical_events.py all' to load additional events."
+            if mocha_track else
+            "No local historical event catalog. Run "
+            "'python backend/model_loaders/historical_events.py all'."
+        ),
+        "sources": {
+            "cyclones": sources.get("cyclones", {}).get("name", "")
+            if isinstance(sources.get("cyclones"), dict) else "",
+            "enso": sources.get("enso", {}).get("name", "")
+            if isinstance(sources.get("enso"), dict) else "",
+        },
+    }
+
+
+@app.get("/api/history/status")
+def historical_status() -> dict[str, str]:
+    return {"storage_format": "historical-events-zarr-v1"}
+
+
+def _historical_event_store(
+    event_type: str,
+    event_id: str,
+) -> tuple[dict[str, Any], zarr.Group]:
+    if not event_id or any(
+        character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+        for character in event_id
+    ):
+        raise HTTPException(400, "Invalid historical event ID.")
+    try:
+        catalog = json.loads(HISTORICAL_EVENTS_CATALOG.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise HTTPException(
+            404,
+            "Historical events are not installed. Run "
+            "'python backend/model_loaders/historical_events.py all'.",
+        ) from error
+    except (OSError, json.JSONDecodeError) as error:
+        raise HTTPException(500, f"Could not read historical event catalog: {error}") from error
+
+    group_name = {"cyclone": "cyclones", "enso": "enso"}.get(event_type)
+    if not group_name or not isinstance(catalog, dict):
+        raise HTTPException(500, "Historical event catalog has an invalid format.")
+    events = catalog.get(group_name, [])
+    if not isinstance(events, list):
+        raise HTTPException(500, "Historical event catalog contains an invalid event group.")
+    events = list(events)
+    if event_type == "enso":
+        la_nina_events = catalog.get("la_nina", [])
+        if not isinstance(la_nina_events, list):
+            raise HTTPException(500, "Historical event catalog contains an invalid event group.")
+        events.extend(la_nina_events)
+    if not isinstance(events, list) or not all(isinstance(item, dict) for item in events):
+        raise HTTPException(500, "Historical event catalog contains an invalid event group.")
+    event = next((item for item in events if item.get("id") == event_id), None)
+    if event is None:
+        raise HTTPException(404, f"Historical {event_type} event not found: {event_id}")
+
+    store_relative = event.get("store")
+    if not isinstance(store_relative, str):
+        raise HTTPException(500, f"Historical event {event_id} has no Zarr store path.")
+    data_root = HISTORICAL_EVENTS_DIR.resolve()
+    store_path = (data_root / store_relative).resolve()
+    if data_root not in store_path.parents or store_path.suffix != ".zarr":
+        raise HTTPException(500, f"Historical event {event_id} has an unsafe Zarr store path.")
+    if not store_path.is_dir():
+        raise HTTPException(404, f"Historical event store is missing: {store_relative}")
+    try:
+        group = zarr.open_group(str(store_path), mode="r")
+    except Exception as error:
+        raise HTTPException(500, f"Could not open historical event store: {error}") from error
+    return event, group
+
+
+def _historical_array(group: zarr.Group, name: str) -> np.ndarray:
+    if name not in group:
+        raise HTTPException(500, f"Historical event store is missing array {name!r}.")
+    values = np.asarray(group[name][:])
+    if values.ndim != 1:
+        raise HTTPException(500, f"Historical event array {name!r} must be one-dimensional.")
+    return values
+
+
+def _event_timestamp(value: int) -> str:
+    return datetime.fromtimestamp(int(value), timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _optional_number(value: float) -> float | None:
+    return round(float(value), 1) if np.isfinite(value) else None
+
+
+def _read_mocha_2023_track() -> dict[str, Any] | None:
+    if not MOCHA_2023_STORE.is_dir():
+        return None
+    try:
+        group = zarr.open_group(str(MOCHA_2023_STORE), mode="r")
+        required = ("time", "center_lat", "center_lon", "maximum_wind", "central_pressure")
+        missing = [name for name in required if name not in group]
+        if missing:
+            raise HTTPException(
+                500,
+                f"Cyclone Mocha Zarr store is missing arrays: {', '.join(missing)}.",
+            )
+        time_array = group["time"]
+        times = np.asarray(time_array[:])
+        latitudes = np.asarray(group["center_lat"][:])
+        longitudes = np.asarray(group["center_lon"][:])
+        winds = np.asarray(group["maximum_wind"][:])
+        pressures = np.asarray(group["central_pressure"][:])
+        if times.ndim != 1 or not times.size or len({
+            len(times), len(latitudes), len(longitudes), len(winds), len(pressures)
+        }) != 1:
+            raise HTTPException(500, "Cyclone Mocha Zarr track arrays are empty or mismatched.")
+        time_units = str(time_array.attrs.get("units", ""))
+        match = re.fullmatch(r"\s*hours since\s+(.+?)\s*", time_units, re.IGNORECASE)
+        if not match:
+            raise HTTPException(
+                500,
+                f"Cyclone Mocha time coordinate has unsupported units: {time_units or 'missing'}.",
+            )
+        origin_text = match.group(1).replace("Z", "+00:00")
+        try:
+            origin = datetime.fromisoformat(origin_text)
+        except ValueError as error:
+            raise HTTPException(500, f"Invalid Cyclone Mocha time origin: {origin_text}") from error
+        if origin.tzinfo is None:
+            origin = origin.replace(tzinfo=timezone.utc)
+        else:
+            origin = origin.astimezone(timezone.utc)
+
+        storm_id = str(group.attrs.get("storm_id", "mocha-2023"))
+        points = []
+        for index, value in enumerate(times):
+            valid = origin + timedelta(hours=float(value))
+            wind = float(winds[index])
+            pressure = float(pressures[index])
+            points.append({
+                "lead_hour": int(round(float(value))),
+                "valid_utc": valid.isoformat().replace("+00:00", "Z"),
+                "lat": round(float(latitudes[index]), 3),
+                "lon": round(float(longitudes[index]) % 360, 3),
+                "existence_signal": 1.0,
+                "wind_knots": _optional_number(wind),
+                "pressure_hpa": _optional_number(pressure),
+                "rmw_nmi": None,
+                "intensity_label": _intensity_label(wind),
+            })
+        attrs = group.attrs
+        return {
+            "model": "CycloneMocha_2023",
+            "model_label": "Cyclone Mocha (2023)",
+            "initialization_utc": points[0]["valid_utc"],
+            "lead_hours": [point["lead_hour"] for point in points],
+            "tracks": [{
+                "id": storm_id,
+                "label": "Cyclone Mocha",
+                "points": points,
+            }],
+            "tracking_method": (
+                "Observed cyclone center, maximum wind, and central pressure from the "
+                "local CycloneMocha_2023 Zarr store. Wind fields in the store are synthetic."
+            ),
+            "source": str(attrs.get("historical_source", "Local CycloneMocha_2023 Zarr store")),
+            "source_url": "",
+        }
+    except HTTPException:
+        raise
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        raise HTTPException(500, f"Could not read Cyclone Mocha Zarr track: {error}") from error
+
+
+def _intensity_label(wind_knots: float | None) -> str:
+    if wind_knots is None or not np.isfinite(wind_knots):
+        return "—"
+    if wind_knots < 34:
+        return "TD"
+    if wind_knots < 64:
+        return "TS"
+    if wind_knots < 83:
+        return "1"
+    if wind_knots < 96:
+        return "2"
+    if wind_knots < 113:
+        return "3"
+    if wind_knots < 137:
+        return "4"
+    return "5"
+
+
+@app.get("/api/history/cyclones/{storm_id}")
+def historical_cyclone(storm_id: str) -> dict[str, Any]:
+    if storm_id == "CycloneMocha_2023":
+        track = _read_mocha_2023_track()
+        if track is None:
+            raise HTTPException(404, "models/CycloneMocha_2023/forecast.zarr was not found.")
+        return track
+    event, group = _historical_event_store("cyclone", storm_id)
+    times = _historical_array(group, "valid_time_unix")
+    lead_hours = _historical_array(group, "lead_hour")
+    latitudes = _historical_array(group, "latitude")
+    longitudes = _historical_array(group, "longitude")
+    winds = _historical_array(group, "wind_knots")
+    pressures = _historical_array(group, "pressure_hpa")
+    rmws = _historical_array(group, "rmw_nmi")
+    intensities = _historical_array(group, "intensity_code")
+    lengths = {
+        len(times), len(lead_hours), len(latitudes), len(longitudes),
+        len(winds), len(pressures), len(rmws), len(intensities),
+    }
+    if len(lengths) != 1 or not len(times):
+        raise HTTPException(500, f"Historical cyclone store {storm_id} has mismatched arrays.")
+    points = []
+    for index in range(len(times)):
+        intensity_index = int(intensities[index])
+        points.append({
+            "lead_hour": int(lead_hours[index]),
+            "valid_utc": _event_timestamp(int(times[index])),
+            "lat": round(float(latitudes[index]), 3),
+            "lon": round(float(longitudes[index]), 3),
+            "existence_signal": 1.0,
+            "wind_knots": _optional_number(winds[index]),
+            "pressure_hpa": _optional_number(pressures[index]),
+            "rmw_nmi": _optional_number(rmws[index]),
+            "intensity_label": (
+                ("TD", "TS", "1", "2", "3", "4", "5", "—")[intensity_index]
+                if 0 <= intensity_index <= 7 else "—"
+            ),
+        })
+    attrs = group.attrs
+    return {
+        "model": "HistoricalEvents",
+        "model_label": event.get("label", attrs.get("label", "Historical cyclone")),
+        "initialization_utc": attrs.get("initialization_utc", points[0]["valid_utc"]),
+        "lead_hours": [point["lead_hour"] for point in points],
+        "tracks": [{
+            "id": storm_id,
+            "label": event.get("name", attrs.get("name", event.get("label", storm_id))),
+            "points": points,
+        }],
+        "tracking_method": attrs.get("tracking_method", ""),
+        "source": attrs.get("source", ""),
+        "source_url": attrs.get("source_url", ""),
+    }
+
+
+@app.get("/api/history/enso/{episode_id}")
+def historical_enso(episode_id: str) -> dict[str, Any]:
+    event, group = _historical_event_store("enso", episode_id)
+    times = _historical_array(group, "valid_time_unix")
+    season_codes = _historical_array(group, "season_code")
+    years = _historical_array(group, "year")
+    sst = _historical_array(group, "sst_c")
+    oni = _historical_array(group, "oni_c")
+    if len({len(times), len(season_codes), len(years), len(sst), len(oni)}) != 1 or not len(times):
+        raise HTTPException(500, f"Historical ENSO store {episode_id} has mismatched arrays.")
+    season_names = list(HISTORICAL_SEASON_MONTH)
+    if any(int(code) >= len(season_names) for code in season_codes):
+        raise HTTPException(500, f"Historical ENSO store {episode_id} has invalid season codes.")
+    points = []
+    for index in range(len(times)):
+        season = season_names[int(season_codes[index])]
+        points.append({
+            "season": season,
+            "year": int(years[index]),
+            "valid_utc": _event_timestamp(int(times[index])),
+            "sst_c": round(float(sst[index]), 2),
+            "oni_c": round(float(oni[index]), 2),
+        })
+    attrs = group.attrs
+    return {
+        "model": "HistoricalEvents",
+        "model_label": event.get("phase", attrs.get("phase", "ENSO context")),
+        "id": episode_id,
+        "phase": event.get("phase", attrs.get("phase", "")),
+        "label": event.get("label", attrs.get("label", episode_id)),
+        "start_utc": event.get("start_utc", points[0]["valid_utc"]),
+        "end_utc": event.get("end_utc", points[-1]["valid_utc"]),
+        "points": points,
+        "tracking_method": attrs.get("tracking_method", ""),
+        "source": attrs.get("source", ""),
+        "source_url": attrs.get("source_url", ""),
     }
 
 
@@ -819,7 +1248,7 @@ def _nearest_index(axis: np.ndarray, value: float) -> int:
 
 @app.get("/api/timeseries")
 def timeseries(
-    model: str = Query("earth2"),
+    model: str = Query("FourCastNet3"),
     variable: str = Query("t2m"),
     ensemble: str = Query("mean"),
     points: str = Query(
@@ -924,7 +1353,7 @@ def timeseries(
 
 @app.get("/api/field")
 def field(
-    model: str = Query("earth2"),
+    model: str = Query("FourCastNet3"),
     variable: str = Query("t2m"),
     region: str = Query("southeast_asia"),
     lead_hour: int = Query(0),
@@ -1107,5 +1536,6 @@ if __name__ == "__main__":
     import os
 
     port = int(os.environ.get("ZARR_API_PORT", "8766"))
-    print(f"[zarr-api] Serving {ZARR_PATH} (exists={ZARR_PATH.exists()}) on :{port}")
+    _discover_models()
+    print(f"[zarr-api] Serving {len(MODELS)} discovered model(s) on :{port}")
     uvicorn.run(app, host="127.0.0.1", port=port, reload=False)

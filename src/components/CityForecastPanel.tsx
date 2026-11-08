@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { CityInfo } from '../types/forecast';
-import { WEATHER_VARIABLES_BY_ID } from '../services/weatherVariables';
+import { WEATHER_VARIABLES_BY_ID, type WeatherVariableDef } from '../services/weatherVariables';
 import {
   ZARR_VAR_LABELS_MM,
   fetchZarrMeta,
@@ -48,13 +48,35 @@ export const CityForecastPanel: React.FC<CityForecastPanelProps> = ({
   const [metaError, setMetaError] = useState('');
 
   const availableVariables = useMemo(
-    () => (meta?.available_variables ?? [])
-      .map((id) => WEATHER_VARIABLES_BY_ID[id])
-      .filter((variable) => variable != null),
+    () => (meta?.available_variables ?? []).map((id): WeatherVariableDef => {
+      const knownVariable = WEATHER_VARIABLES_BY_ID[id];
+      if (knownVariable) return knownVariable;
+
+      const modelVariable = meta?.variables[id];
+      const label = modelVariable?.label || id;
+      return {
+        id,
+        categoryId: 'humidity',
+        labelEn: label,
+        labelMm: ZARR_VAR_LABELS_MM[id] || modelVariable?.label_mm || label,
+        unit: modelVariable?.unit || '',
+        min: 0,
+        max: 1,
+        color: '#38bdf8',
+        descriptionEn: label,
+        descriptionMm: label,
+      };
+    }),
     [meta]
   );
-  const primaryVar = WEATHER_VARIABLES_BY_ID[primaryVarId] || availableVariables[0] || WEATHER_VARIABLES_BY_ID.t2m;
-  const secondaryVar = WEATHER_VARIABLES_BY_ID[secondaryVarId] || availableVariables[1] || primaryVar;
+  const primaryVar = WEATHER_VARIABLES_BY_ID[primaryVarId]
+    || availableVariables.find((variable) => variable.id === primaryVarId)
+    || availableVariables[0]
+    || WEATHER_VARIABLES_BY_ID.t2m;
+  const secondaryVar = WEATHER_VARIABLES_BY_ID[secondaryVarId]
+    || availableVariables.find((variable) => variable.id === secondaryVarId)
+    || availableVariables[1]
+    || primaryVar;
 
   const cityPoints = useMemo(
     () => {
@@ -79,8 +101,7 @@ export const CityForecastPanel: React.FC<CityForecastPanelProps> = ({
     fetchZarrMeta(modelId, ac.signal)
       .then((result) => {
         if (ac.signal.aborted) return;
-        const variables = result.available_variables
-          .filter((id) => WEATHER_VARIABLES_BY_ID[id]);
+        const variables = result.available_variables;
         if (!variables.length) {
           setMetaError('This model has no supported forecast variables.');
           setZarrStatus('error');
@@ -423,7 +444,7 @@ export const CityForecastPanel: React.FC<CityForecastPanelProps> = ({
                   >
                     {availableVariables.map((v) => (
                       <option key={v.id} value={v.id} className="bg-slate-900 text-white">
-                        {ZARR_VAR_LABELS_MM[v.id] || v.labelMm} ({v.labelEn}) — {v.unit}
+                        {ZARR_VAR_LABELS_MM[v.id] || v.labelMm} — {v.unit}
                       </option>
                     ))}
                   </select>
@@ -447,7 +468,7 @@ export const CityForecastPanel: React.FC<CityForecastPanelProps> = ({
                   >
                     {availableVariables.map((v) => (
                       <option key={v.id} value={v.id} className="bg-slate-900 text-white">
-                        {ZARR_VAR_LABELS_MM[v.id] || v.labelMm} ({v.labelEn}) — {v.unit}
+                        {ZARR_VAR_LABELS_MM[v.id] || v.labelMm} — {v.unit}
                       </option>
                     ))}
                   </select>

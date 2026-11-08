@@ -1,21 +1,22 @@
 import React from 'react';
 import { ViewMode } from '../types/forecast';
 import { BURMESE_STRINGS } from '../utils/burmese';
-import { Maximize2, Minimize2, Play, Pause, Globe, Map, BarChart3, Cpu, Clock } from 'lucide-react';
-import type { ZarrModel } from '../services/zarrApi';
+import { Maximize2, Minimize2, Globe, Map, BarChart3, Cpu, History, RefreshCw } from 'lucide-react';
+import type { HistoricalEventCatalog, ZarrModel } from '../services/zarrApi';
 
 interface ShowcaseHeaderProps {
   viewMode: ViewMode;
   onViewModeChange: (mode: ViewMode) => void;
   isFullscreen: boolean;
   onToggleFullscreen: () => void;
-  isPlaying: boolean;
-  onTogglePlay: () => void;
-  leadHour?: number;
-  validMyanmarTime: string;
   models: ZarrModel[];
   selectedModelId: string;
   onSelectModel: (modelId: string) => void;
+  historicalEvents: HistoricalEventCatalog;
+  selectedHistoricalEvent: string;
+  onSelectHistoricalEvent: (selection: string) => void;
+  onRefreshHistoricalEvents: () => void;
+  historicalEventsError: string;
 }
 
 export const ShowcaseHeader: React.FC<ShowcaseHeaderProps> = ({
@@ -23,12 +24,14 @@ export const ShowcaseHeader: React.FC<ShowcaseHeaderProps> = ({
   onViewModeChange,
   isFullscreen,
   onToggleFullscreen,
-  isPlaying,
-  onTogglePlay,
-  validMyanmarTime,
   models,
   selectedModelId,
   onSelectModel,
+  historicalEvents,
+  selectedHistoricalEvent,
+  onSelectHistoricalEvent,
+  onRefreshHistoricalEvents,
+  historicalEventsError,
 }) => {
   const navBtn = (mode: ViewMode, icon: React.ReactNode, label: string) => (
     <button
@@ -79,6 +82,64 @@ export const ShowcaseHeader: React.FC<ShowcaseHeaderProps> = ({
         {/* Actions — always visible on the right, never overlapped */}
         <div className="relative z-10 flex shrink-0 items-center gap-1.5 sm:gap-2 ml-auto">
           <label
+            className="flex min-w-0 items-center gap-1 rounded-full border border-cyan-400/25 bg-cyan-950/30 px-2 py-1.5 text-[11px] text-slate-200 sm:gap-1.5 sm:px-2.5"
+            title={historicalEventsError || historicalEvents.message || 'Choose a historical cyclone or climate episode to replay'}
+          >
+            <History className="h-3.5 w-3.5 shrink-0 text-cyan-300" />
+            <span className="hidden xl:inline">Historical replay</span>
+            <select
+              aria-label="Historical replay event"
+              value={selectedHistoricalEvent}
+              onChange={(event) => onSelectHistoricalEvent(event.target.value)}
+              className="max-w-[5.5rem] bg-transparent text-[11px] font-semibold text-white outline-none sm:max-w-36 sm:text-xs xl:max-w-48"
+            >
+              <option value="" className="bg-slate-900">Select event…</option>
+              {historicalEvents.cyclones.length ? (
+                <optgroup label="Cyclone · wind + pressure">
+                  {historicalEvents.cyclones.map((event) => (
+                    <option key={event.id} value={`cyclone:${event.id}`} className="bg-slate-900">
+                      {event.label}
+                    </option>
+                  ))}
+                </optgroup>
+              ) : null}
+              {historicalEvents.enso.length ? (
+                <optgroup label="ENSO · El Niño · SST + ONI">
+                  {historicalEvents.enso.map((event) => (
+                    <option key={event.id} value={`enso:${event.id}`} className="bg-slate-900">
+                      {event.label}
+                    </option>
+                  ))}
+                </optgroup>
+              ) : null}
+              {historicalEvents.la_nina.length ? (
+                <optgroup label="La Niña · SST + ONI">
+                  {historicalEvents.la_nina.map((event) => (
+                    <option key={event.id} value={`enso:${event.id}`} className="bg-slate-900">
+                      {event.label}
+                    </option>
+                  ))}
+                </optgroup>
+              ) : null}
+              {!historicalEvents.cyclones.length && !historicalEvents.enso.length && !historicalEvents.la_nina.length && (
+                <option value="" disabled className="bg-slate-900">
+                  {historicalEventsError
+                    ? 'Replay unavailable'
+                    : 'No local events — run loader'}
+                </option>
+              )}
+            </select>
+          </label>
+          <button
+            type="button"
+            onClick={onRefreshHistoricalEvents}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/15 bg-white/5 text-slate-300 transition hover:bg-white/15 hover:text-white sm:h-9 sm:w-9"
+            title={historicalEventsError || historicalEvents.message || 'Refresh local historical event catalog'}
+            aria-label="Refresh historical event catalog"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+          </button>
+          <label
             className="flex min-w-0 items-center gap-1 rounded-full border border-white/15 bg-white/5 px-2 py-1.5 text-[11px] text-slate-300 sm:gap-1.5 sm:px-2.5"
             title="Select the local forecast model"
           >
@@ -99,25 +160,6 @@ export const ShowcaseHeader: React.FC<ShowcaseHeaderProps> = ({
               ))}
             </select>
           </label>
-
-          {validMyanmarTime && (
-            <div
-              className="hidden 2xl:flex max-w-[16rem] items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-950/40 px-2.5 py-1 text-[11px] text-emerald-300"
-              title={validMyanmarTime}
-            >
-              <Clock className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
-              <span className="font-mono truncate">{validMyanmarTime}</span>
-            </div>
-          )}
-
-          <button
-            onClick={onTogglePlay}
-            className="flex items-center gap-1.5 rounded-full border border-white/15 bg-white/5 px-2.5 sm:px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:bg-white/15 hover:text-white"
-            title={isPlaying ? BURMESE_STRINGS.pauseLoop : BURMESE_STRINGS.autoPlay}
-          >
-            {isPlaying ? <Pause className="h-3.5 w-3.5 text-amber-400" /> : <Play className="h-3.5 w-3.5 text-emerald-400" />}
-            <span className="hidden xl:inline">{isPlaying ? BURMESE_STRINGS.pauseLoop : BURMESE_STRINGS.autoPlay}</span>
-          </button>
 
           <button
             onClick={onToggleFullscreen}

@@ -1,0 +1,135 @@
+.cyclone-pulse-marker {
+  position: relative;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  will-change: transform;
+}
+
+.cyclone-forecast-marker-button {
+  display: grid;
+  place-items: center;
+  padding: 5px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+}
+
+.cyclone-forecast-marker {
+  position: relative;
+  border: 1px solid rgba(255, 110, 82, 0.95);
+  border-radius: 50%;
+  background: #f43b2c;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.78), 0 0 8px rgba(255, 38, 35, 0.82);
+  transition: transform 180ms ease, background-color 180ms ease;
+}
+
+.cyclone-forecast-marker::after {
+  position: absolute;
+  inset: -5px;
+  border: 1.5px solid rgba(255, 38, 56, 0.9);
+  border-radius: 50%;
+  content: '';
+  animation: cyclone-forecast-pulse 2.4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+.cyclone-forecast-marker:not(.is-selected) {
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.72), 0 0 5px rgba(255, 38, 56, 0.55);
+}
+
+.cyclone-forecast-marker-button.is-history .cyclone-forecast-marker {
+  background: #ff5a37;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.78), 0 0 8px rgba(255, 38, 35, 0.82);
+}
+
+.cyclone-forecast-marker-button.is-observed.is-current .cyclone-forecast-marker {
+  border-color: rgba(255, 255, 255, 0.98);
+  background: #f43b2c;
+  box-shadow: 0 0 0 2px rgba(9, 22, 36, 0.9), 0 0 12px rgba(255, 65, 54, 0.85);
+}
+
+.cyclone-forecast-marker-button.is-observed:hover .cyclone-forecast-marker,
+.cyclone-forecast-marker-button.is-observed:focus-visible .cyclone-forecast-marker {
+  background: #ff765e;
+}
+
+.cyclone-forecast-marker-button:hover .cyclone-forecast-marker,
+.cyclone-forecast-marker-button:focus-visible .cyclone-forecast-marker {
+  transform: scale(1.3);
+}
+
+.cyclone-forecast-marker-button:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+
+.cyclone-pulse-wave {
+  position: absolute;
+  inset: 30%;
+  border: 6px solid rgba(255, 48, 37, 0.95);
+  border-radius: 50%;
+  box-shadow: 0 0 18px rgba(255, 42, 30, 0.6), inset 0 0 12px rgba(255, 42, 30, 0.3);
+  animation: cyclone-pulse-wave 3.2s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+  will-change: transform, opacity;
+}
+
+.cyclone-pulse-wave--delayed {
+  animation-delay: 1.6s;
+}
+
+.cyclone-pulse-core {
+  position: absolute;
+  z-index: 1;
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(255, 255, 255, 0.95);
+  border-radius: 50%;
+  background: #f43b2c;
+  box-shadow: 0 0 0 3px rgba(15, 23, 42, 0.8), 0 0 18px rgba(255, 65, 54, 0.9);
+}
+
+@keyframes cyclone-forecast-pulse {
+  0% {
+    transform: scale(0.8);
+    opacity: 0.75;
+  }
+
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+
+@keyframes cyclone-pulse-wave {
+  0% {
+    transform: scale(0.14);
+    opacity: 0.9;
+  }
+
+  100% {
+    transform: scale(5.2);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cyclone-pulse-wave,
+  .cyclone-forecast-marker::after {
+    animation: none;
+  }
+
+  .cyclone-pulse-wave {
+    animation: none;
+    transform: scale(0.7);
+    opacity: 0.9;
+  }
+
+  .cyclone-pulse-core {
+    animation: none;
+  }
+
+  .cyclone-forecast-marker {
+    transition: none;
+  }
+}

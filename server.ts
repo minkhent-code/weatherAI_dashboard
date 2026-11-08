@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, type ChildProcess } from 'node:child_process';
 import http from 'node:http';
+import net from 'node:net';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,16 +14,38 @@ const app = express();
 const PORT = Number(process.env.PORT) || 5180;
 const HOST = '0.0.0.0';
 // 8765 is often used by Nvidia_test_zarr_format/viewer — default aside for this app
-const ZARR_API_PORT = Number(process.env.ZARR_API_PORT) || 8766;
-const ZARR_API_ORIGIN = `http://127.0.0.1:${ZARR_API_PORT}`;
+const configuredZarrApiPort = Number(process.env.ZARR_API_PORT) || 8766;
+let zarrApiPort = configuredZarrApiPort;
+const zarrApiOrigin = () => `http://127.0.0.1:${zarrApiPort}`;
 
 let zarrChild: ChildProcess | null = null;
 
-function probeZarrApi(): Promise<boolean> {
+function probeZarrApi(port: number, requireHistoryApi = false): Promise<boolean> {
   return new Promise((resolve) => {
-    const req = http.get(`${ZARR_API_ORIGIN}/api/health`, (res) => {
-      res.resume();
-      resolve((res.statusCode || 500) < 500);
+    const probePath = requireHistoryApi ? '/api/history/status' : '/api/health';
+    const req = http.get(`http://127.0.0.1:${port}${probePath}`, (res) => {
+      if (!requireHistoryApi) {
+        res.resume();
+        resolve((res.statusCode || 500) < 500);
+        return;
+      }
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk: string) => {
+        body += chunk;
+      });
+      res.on('end', () => {
+        if (res.statusCode !== 200) {
+          resolve(false);
+          return;
+        }
+        try {
+          const status = JSON.parse(body) as { storage_format?: string };
+          resolve(status.storage_format === 'historical-events-zarr-v1');
+        } catch {
+          resolve(false);
+        }
+      });
     });
     req.on('error', () => resolve(false));
     req.setTimeout(800, () => {
@@ -32,21 +55,58 @@ function probeZarrApi(): Promise<boolean> {
   });
 }
 
+function findAvailablePort(startPort: number): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once('error', reject);
+    server.listen(startPort, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        server.close();
+        reject(new Error('Could not determine an available local API port.'));
+        return;
+      }
+      const { port } = address;
+      server.close((error) => error ? reject(error) : resolve(port));
+    });
+  });
+}
+
 async function startZarrSidecar() {
-  if (await probeZarrApi()) {
-    console.log(`[zarr-api] Already running at ${ZARR_API_ORIGIN}`);
+  if (await probeZarrApi(zarrApiPort, true)) {
+    console.log(`[zarr-api] Compatible API already running at ${zarrApiOrigin()}`);
     return;
+  }
+  if (await probeZarrApi(zarrApiPort)) {
+    const oldPort = zarrApiPort;
+    zarrApiPort = await findAvailablePort(oldPort + 1);
+    console.warn(
+      `[zarr-api] API on :${oldPort} is outdated; starting the historical replay API on :${zarrApiPort}`
+    );
   }
   const script = path.resolve(__dirname, 'backend', 'zarr_field_server.py');
   const venvPython = process.platform === 'win32'
     ? path.resolve(__dirname, '.venv', 'Scripts', 'python.exe')
     : path.resolve(__dirname, '.venv', 'bin', 'python');
-  const py = process.env.PYTHON || (existsSync(venvPython) ? venvPython : 'python');
-  console.log(`[zarr-api] Starting ${py} ${script} on :${ZARR_API_PORT}`);
+  const condaPython = process.env.CONDA_PREFIX
+    ? path.resolve(
+        process.env.CONDA_PREFIX,
+        process.platform === 'win32' ? 'python.exe' : 'bin/python'
+      )
+    : '';
+  const projectCondaPython = process.platform === 'win32' && process.env.USERPROFILE
+    ? path.resolve(process.env.USERPROFILE, 'miniconda3', 'envs', 'weatherAI_env', 'python.exe')
+    : '';
+  const py = process.env.PYTHON
+    || (existsSync(venvPython) ? venvPython : '')
+    || (condaPython && existsSync(condaPython) ? condaPython : '')
+    || (projectCondaPython && existsSync(projectCondaPython) ? projectCondaPython : '')
+    || 'python';
+  console.log(`[zarr-api] Starting ${py} ${script} on :${zarrApiPort}`);
   zarrChild = spawn(py, [script], {
     cwd: __dirname,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, ZARR_API_PORT: String(ZARR_API_PORT) },
+    env: { ...process.env, ZARR_API_PORT: String(zarrApiPort) },
   });
   zarrChild.stdout?.on('data', (buf) => {
     process.stdout.write(`[zarr-api] ${buf}`);
@@ -58,6 +118,10 @@ async function startZarrSidecar() {
     console.warn(`[zarr-api] exited code=${code} signal=${signal}`);
     zarrChild = null;
   });
+  zarrChild.on('error', (error) => {
+    console.error(`[zarr-api] failed to start ${py}: ${error.message}`);
+    zarrChild = null;
+  });
 }
 
 function proxyToZarr(req: express.Request, res: express.Response) {
@@ -67,10 +131,10 @@ function proxyToZarr(req: express.Request, res: express.Response) {
   const targetPath = `/api${suffix.startsWith('/') ? suffix : `/${suffix}`}`;
   const opts: http.RequestOptions = {
     hostname: '127.0.0.1',
-    port: ZARR_API_PORT,
+    port: zarrApiPort,
     path: targetPath,
     method: req.method,
-    headers: { ...req.headers, host: `127.0.0.1:${ZARR_API_PORT}` },
+    headers: { ...req.headers, host: `127.0.0.1:${zarrApiPort}` },
   };
 
   const upstream = http.request(opts, (up) => {
@@ -84,7 +148,7 @@ function proxyToZarr(req: express.Request, res: express.Response) {
     res.status(503).json({
       error: 'Zarr field API unavailable',
       detail: String(err.message || err),
-      hint: `Start backend/zarr_field_server.py on port ${ZARR_API_PORT}, with forecast.zarr in the project root.`,
+      hint: `Start backend/zarr_field_server.py on port ${zarrApiPort}; check Python and backend dependencies.`,
     });
   });
   req.pipe(upstream);
@@ -123,7 +187,7 @@ async function startServer() {
 
   const httpServer = app.listen(PORT, HOST, () => {
     console.log(`[LOCAL showcase] Open http://localhost:${PORT}  (normal app stays on :3000)`);
-    console.log(`[LOCAL showcase] Zarr API proxied at /api/zarr/* → ${ZARR_API_ORIGIN}`);
+    console.log(`[LOCAL showcase] Zarr API proxied at /api/zarr/* → ${zarrApiOrigin()}`);
   });
   httpServer.on('error', (err: NodeJS.ErrnoException) => {
     console.error(`[Server] Failed to listen on ${PORT}: ${err.message}`);

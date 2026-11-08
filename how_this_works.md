@@ -29,25 +29,29 @@ Deep start guide: [`README.md`](README.md).
 
 ## Private office use
 
-Keep this repository private. Put the Earth-2 store in project-root `forecast.zarr/`; put additional stores in `models/<model-id>/` (or `models/<model-id>/forecast.zarr/`). Model stores stay local and are gitignored. The API discovers Earth-2-style stores and nested Pangu6 `.zarr` stores with global `[time, lead, lat, lon]` arrays and forecast metadata in root attributes. No NVIDIA API key for the website. The **satellite-radar** page needs internet for Esri basemap tiles; forecast grids stay on disk.
+Keep this repository private. Put supported Zarr stores in `models/<model-id>/` (or `models/<model-id>/forecast.zarr/`). Zarr IDs are `FourCastNet3`, `PrecipitationAFNOv2`, `Pangu-Weather`, `WindGustAFNO`, and `WeatherNext2Cyclones`; stores stay local and are gitignored. Each model has a dedicated adapter under `backend/model_loaders/`. Run `python backend/model_loaders/historical_events.py all` separately to download NOAA IBTrACS and CPC ONI into event-specific Zarr stores under `models/HistoricalEvents/`; IBTrACS is about 330 MB. Cyclones are retained when their observed track enters 9–29°N, 92–102°E, and each retained storm's full track is stored. The header lists those events and all qualifying ONI episodes; the bottom dock provides playback, speed, looping, and scrubbing. ONI episodes are Pacific-wide climate context, not Myanmar-local SST, rainfall, or impact observations. The API reads each selected event store and adapts it to the replay UI. No NVIDIA API key for the website. Map views need internet for Esri basemap tiles; forecast grids stay on disk.
 
 ## Layout
 
 ```text
 Local_NVIDIA_FourCastNet_Myanmar_AI_Weather_Showcase/
-  forecast.zarr/                 Earth-2 global store (local only)
-  models/<model-id>/             additional local stores (Earth-2 or supported Pangu6 layout)
+  models/<model-id>/             one of the five supported local forecast stores
+  models/HistoricalEvents/
+    catalog.json                 event index
+    cyclones/<event>.zarr/       Myanmar-bounds storm tracks
+    enso/<episode>.zarr/         Pacific ONI episode context
   server.ts                      Express + Vite; /api/zarr proxy
-  backend/zarr_field_server.py   FastAPI /api/meta + /api/field
+  backend/zarr_field_server.py   FastAPI forecast and historical replay endpoints
+  backend/model_loaders/         model-specific forecast output definitions
   notebook/…ipynb                Colab zip factory
   public/forecast_data/          sea-borders.json, sample layers
   public/textures/               globe imagery
   src/
-    App.tsx                      playback (no city tour on radar page)
+    App.tsx                      views and historical replay selection
     components/ForecastMap2D.tsx MapLibre heat + city pins
     components/SatelliteGlobe3D.tsx
     components/CityForecastPanel.tsx
-    components/TimelineControls.tsx   0.5x … 10x
+    components/TimelineControls.tsx   playback and timeline dock
     services/zarrApi.ts          fetch meta/field
     data/forecastData.json       bundled globe/city sample
   README.md
@@ -57,7 +61,7 @@ Local_NVIDIA_FourCastNet_Myanmar_AI_Weather_Showcase/
 ## End-to-end flow
 
 ```text
-forecast.zarr/ + models/<model-id>/ (local model stores on disk)
+models/<model-id>/ (local model stores on disk)
         │
         ▼
 Python field API :8766
@@ -103,10 +107,13 @@ The globe keeps the older bundled / Colab temp+wind data path. City trends reque
 | MapLibre fields | Selected local Zarr model via Python API |
 | City trends | Selected local Zarr model; bundled JSON or Colab FCN zip fallback |
 | Globe temp + wind | Bundled JSON or Colab FCN zip |
-| `storm_alert.json` | Optional notebook rule; **not shown** in UI |
+| WeatherNext2Cyclones | Global forecast tracker derived from cyclone-existence fields |
+| Historical cyclones | IBTrACS track, wind, and pressure for storms entering Myanmar bounds |
+| ENSO / La Niña | NOAA ONI episode context and Niño 3.4 SST; not local Myanmar observations |
+| `storm_alert.json` | Optional notebook rule; separate from the WeatherNext tracker |
 | Humidity / rain as Colab zip products | Not in the Colab zip path (MapLibre can show `q850` / `tcwv` from zarr) |
 
-Honest demo line: *“Satellite-radar and city-trends views use the selected local model when available; the globe uses the bundled or Colab sample. No cyclone HUD.”*
+Honest demo line: *“Satellite-radar and city-trends views use model-specific local fields; historical cyclone tracks and ENSO/La Niña indices are NOAA observations; the globe uses the bundled or Colab sample.”*
 
 ## Colab export (zip factory for globe / city)
 
@@ -114,7 +121,7 @@ Notebook: [`notebook/NVIDIA_Earth2_GPU_Colab_Myanmar.ipynb`](notebook/NVIDIA_Ear
 
 1. Colab + GPU → install FCN → restart → Gradio forecast.  
 2. Download zip → drop on UI header.  
-3. Updates globe / city grids; does not replace `forecast.zarr` for MapLibre.
+3. Updates globe / city grids; local model folders continue to feed the MapLibre views.
 
 | Notebook output | Globe / city |
 | --- | --- |
@@ -138,11 +145,10 @@ Parser: `src/utils/zipForecastParser.ts`.
 | Feature | Behaviour |
 | --- | --- |
 | Boot | Bundled `DEFAULT_FORECAST_DATA` for globe/city; MapLibre loads zarr meta when API is up |
-| Radar playback | Steps leads; **selected city stays fixed** |
-| Globe / trends playback | Can city-tour after last step |
+| Historical replay | Reads per-event Zarr stores for Myanmar-bounds cyclones or NOAA ONI climate-context episodes |
 | Network | Esri tiles on radar page only; no NVIDIA NIM / Open-Meteo forecast calls |
 
-Keyboard: `Space` play/pause · `←`/`→` step · `F` fullscreen.
+Keyboard: `←`/`→` steps through the active timeline · `Space` toggles playback · `F` fullscreen.
 
 ## Bounds
 
@@ -172,8 +178,8 @@ StormScope is out of scope (different nowcasting stack). Optional notebook `stor
 | Zarr client | `src/services/zarrApi.ts` |
 | Field API / store path | `backend/zarr_field_server.py` |
 | Proxy / sidecar spawn | `server.ts` |
-| Playback / city tour rules | `src/App.tsx` |
-| Timeline speeds | `src/components/TimelineControls.tsx` |
+| Historical replay selection | `src/App.tsx` |
+| Playback and timeline dock | `src/components/TimelineControls.tsx` |
 | Colab zip ingest | `src/utils/zipForecastParser.ts` |
 | Bundled globe sample | `src/data/forecastData.json` |
 | Docs | `README.md`, `how_this_works.md` |

@@ -67,6 +67,27 @@ const CMAPS: Record<string, [number, [number, number, number]][]> = {
     [0.75, [34, 94, 168]],
     [1, [8, 29, 88]],
   ],
+  magma: [
+    [0, [0, 0, 4]],
+    [0.25, [80, 18, 123]],
+    [0.5, [182, 54, 121]],
+    [0.75, [251, 136, 97]],
+    [1, [252, 253, 191]],
+  ],
+  inferno: [
+    [0, [0, 0, 4]],
+    [0.25, [87, 15, 109]],
+    [0.5, [188, 55, 84]],
+    [0.75, [249, 142, 9]],
+    [1, [252, 255, 164]],
+  ],
+  plasma: [
+    [0, [13, 8, 135]],
+    [0.25, [126, 3, 168]],
+    [0.5, [204, 71, 120]],
+    [0.75, [248, 149, 64]],
+    [1, [240, 249, 33]],
+  ],
   RdBu_r: [
     [0, [5, 48, 97]],
     [0.25, [103, 169, 207]],
@@ -891,11 +912,18 @@ export const ForecastMap2D: React.FC<ForecastMap2DProps> = ({
         <div ref={mapHostRef} className="h-full w-full" />
       </div>
 
-      {/* Variable chips — keep showcase glass style */}
-      <div className="pointer-events-auto absolute left-3 right-3 top-[4.5rem] z-20 flex flex-wrap gap-1.5 sm:left-4 sm:right-auto sm:max-w-[min(100%,42rem)]">
+      {/* Variable chips — larger model catalogs scroll without switching controls. */}
+      <div
+        aria-label="Forecast parameters"
+        className={`pointer-events-auto absolute left-3 right-3 top-[4.5rem] z-20 flex flex-wrap gap-1.5 sm:left-4 sm:right-auto sm:max-w-[min(100%,42rem)] ${
+          availableVars.length > 12
+            ? 'max-h-[35vh] overflow-y-auto rounded-xl border border-white/10 bg-black/55 p-2 backdrop-blur-xl'
+            : ''
+        }`}
+      >
         {availableVars.map((id) => {
           const active = variable === id;
-          const label = ZARR_VAR_LABELS_MM[id] || meta?.variables?.[id]?.label || id;
+          const label = ZARR_VAR_LABELS_MM[id] || meta?.variables?.[id]?.label_mm || meta?.variables?.[id]?.label || id;
           return (
             <button
               key={id}

@@ -1,12 +1,13 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { CityInfo } from '../types/forecast';
 import { BURMESE_STRINGS, toBurmeseNumber, BURMESE_CITIES_MAP } from '../utils/burmese';
 import { getStepTimeWindow } from '../utils/forecastTime';
 import { X, Thermometer, Wind } from 'lucide-react';
+import { fetchZarrMeta, fetchZarrTimeseries } from '../services/zarrApi';
 
 interface CityWeatherPopup3DProps {
   city: CityInfo;
-  validTimesUtc: string[];
+  modelId: string;
   currentStepIndex: number;
   onClose: () => void;
   /** Kept for call-site compatibility; city is already selected when the popup opens */
@@ -14,22 +15,106 @@ interface CityWeatherPopup3DProps {
   isSelectedCity?: boolean;
 }
 
+interface CityWeatherSeries {
+  leadHours: number[];
+  validTimesUtc: string[];
+  temperatureC: number[];
+  windKmh: number[];
+  pressureHpa: number[];
+  totalColumnWaterVapour: number[];
+}
+
 export const CityWeatherPopup3D: React.FC<CityWeatherPopup3DProps> = ({
   city,
-  validTimesUtc,
+  modelId,
   currentStepIndex,
   onClose,
 }) => {
-  const currentF = city.forecasts[currentStepIndex] || city.forecasts[0];
+  const [weatherSeries, setWeatherSeries] = useState<CityWeatherSeries | null>(null);
+  const [loadError, setLoadError] = useState('');
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setWeatherSeries(null);
+    setLoadError('');
+    setIsLoading(true);
+
+    const loadCityForecast = async () => {
+      try {
+        const meta = await fetchZarrMeta(modelId, controller.signal);
+        const requiredVariables = ['t2m', 'wind10m'];
+        const missingVariables = requiredVariables.filter(
+          (variable) => !meta.available_variables.includes(variable)
+        );
+        if (missingVariables.length) {
+          throw new Error(`Forecast data is missing: ${missingVariables.join(', ')}`);
+        }
+
+        const optionalVariables = ['msl', 'tcwv'].filter(
+          (variable) => meta.available_variables.includes(variable)
+        );
+        const variables = [...requiredVariables, ...optionalVariables];
+        const responses = await Promise.all(variables.map((variable) =>
+          fetchZarrTimeseries({
+            modelId,
+            variable,
+            points: [{ name: city.name, lat: city.lat, lon: city.lon }],
+            signal: controller.signal,
+          })
+        ));
+        if (controller.signal.aborted) return;
+
+        const seriesByVariable = Object.fromEntries(
+          variables.map((variable, index) => [
+            variable,
+            responses[index].series[city.name] ?? [],
+          ])
+        );
+        const init = new Date(meta.initialization_utc);
+        if (Number.isNaN(init.getTime())) {
+          throw new Error('Forecast initialization time is invalid.');
+        }
+
+        setWeatherSeries({
+          leadHours: meta.lead_hours,
+          validTimesUtc: meta.lead_hours.map((hour) =>
+            new Date(init.getTime() + hour * 3600_000).toISOString()
+          ),
+          temperatureC: seriesByVariable.t2m ?? [],
+          windKmh: (seriesByVariable.wind10m ?? []).map((value) => value * 3.6),
+          pressureHpa: seriesByVariable.msl ?? [],
+          totalColumnWaterVapour: seriesByVariable.tcwv ?? [],
+        });
+      } catch (cause: unknown) {
+        if (cause instanceof Error && cause.name === 'AbortError') return;
+        setLoadError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        if (!controller.signal.aborted) setIsLoading(false);
+      }
+    };
+
+    void loadCityForecast();
+    return () => controller.abort();
+  }, [city.lat, city.lon, city.name, modelId]);
+
+  const validTimesUtc = weatherSeries?.validTimesUtc ?? [];
+  const currentStep = Math.min(
+    currentStepIndex,
+    Math.max(0, (weatherSeries?.leadHours.length ?? 1) - 1)
+  );
+  const currentValue = (values: number[] | undefined) => {
+    const value = values?.[currentStep];
+    return value != null && Number.isFinite(value) ? value : null;
+  };
+  const temp = currentValue(weatherSeries?.temperatureC);
+  const wind = currentValue(weatherSeries?.windKmh);
+  const pressure = currentValue(weatherSeries?.pressureHpa);
+  const waterVapour = currentValue(weatherSeries?.totalColumnWaterVapour);
   const mmName = city.mmName || BURMESE_CITIES_MAP[city.name]?.mmName || city.name;
   const region = BURMESE_CITIES_MAP[city.name]?.region || city.state;
-  const currentWindow = getStepTimeWindow(validTimesUtc, currentStepIndex);
-
-  const temp = currentF.temperatureC;
-  const wind = currentF.windKmh;
-  const pressure = Math.round(1012 + (temp > 30 ? -2 : 2) + Math.cos(currentStepIndex) * 1.5);
-  const dewPoint = Math.round(temp - 6.5);
-  const humidity = Math.round(62 + Math.sin(currentStepIndex * 0.7) * 8);
+  const currentWindow = getStepTimeWindow(validTimesUtc, currentStep);
+  const leadHours = weatherSeries?.leadHours ?? [];
 
   return (
     <div className="absolute top-24 left-6 z-40 w-80 sm:w-96 rounded-2xl border border-white/20 bg-slate-950/90 p-5 shadow-2xl backdrop-blur-2xl text-white font-burmese animate-in fade-in duration-150">
@@ -68,7 +153,7 @@ export const CityWeatherPopup3D: React.FC<CityWeatherPopup3DProps> = ({
             <span>{BURMESE_STRINGS.temperature}</span>
           </div>
           <div className="mt-1 font-display text-2xl font-bold text-white">
-            {toBurmeseNumber(Math.round(temp))}°C
+            {temp == null ? '—' : `${toBurmeseNumber(Math.round(temp))}°C`}
           </div>
           <div className="text-[11px] text-amber-200/80">
             ၂ မီတာ မြေပြင်အပူချိန်
@@ -82,7 +167,7 @@ export const CityWeatherPopup3D: React.FC<CityWeatherPopup3DProps> = ({
             <span>{BURMESE_STRINGS.windSpeed}</span>
           </div>
           <div className="mt-1 font-display text-2xl font-bold text-white">
-            {toBurmeseNumber(wind.toFixed(1))} <span className="text-xs font-normal">km/h</span>
+            {wind == null ? '—' : toBurmeseNumber(wind.toFixed(1))} <span className="text-xs font-normal">km/h</span>
           </div>
           <div className="text-[11px] text-teal-200/80">
             ၁၀ မီတာ လေတိုက်နှုန်း
@@ -90,36 +175,47 @@ export const CityWeatherPopup3D: React.FC<CityWeatherPopup3DProps> = ({
         </div>
       </div>
 
-      {/* Atmospheric secondary stats */}
-      <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
+      <div className="mt-3 grid grid-cols-2 gap-2 text-center text-xs">
         <div className="rounded-lg bg-white/5 p-2 border border-white/5">
           <div className="text-[10px] text-slate-400">{BURMESE_STRINGS.pressure}</div>
-          <div className="font-mono font-semibold text-white mt-0.5">{toBurmeseNumber(pressure)} <span className="text-[9px]">hPa</span></div>
+          <div className="font-mono font-semibold text-white mt-0.5">
+            {pressure == null ? '—' : `${toBurmeseNumber(pressure.toFixed(1))} hPa`}
+          </div>
         </div>
         <div className="rounded-lg bg-white/5 p-2 border border-white/5">
-          <div className="text-[10px] text-slate-400">{BURMESE_STRINGS.dewPoint}</div>
-          <div className="font-mono font-semibold text-white mt-0.5">{toBurmeseNumber(dewPoint)}°C</div>
-        </div>
-        <div className="rounded-lg bg-white/5 p-2 border border-white/5">
-          <div className="text-[10px] text-slate-400">{BURMESE_STRINGS.humidity}</div>
-          <div className="font-mono font-semibold text-white mt-0.5">{toBurmeseNumber(humidity)}%</div>
+          <div className="text-[10px] text-slate-400">Total column water vapour</div>
+          <div className="font-mono font-semibold text-white mt-0.5">
+            {waterVapour == null ? '—' : `${toBurmeseNumber(waterVapour.toFixed(1))} kg/m²`}
+          </div>
         </div>
       </div>
+
+      {isLoading && (
+        <p role="status" className="mt-3 text-center text-xs text-slate-400">
+          Loading {modelId} forecast data…
+        </p>
+      )}
+      {loadError && (
+        <p role="alert" className="mt-3 rounded-lg border border-rose-400/20 bg-rose-400/5 p-2 text-xs text-rose-200">
+          Forecast data unavailable: {loadError}
+        </p>
+      )}
 
       {/* Rollout strip — 6 windows for a 30 h zip, scrolling row when the run is longer */}
       <div className="mt-4 border-t border-white/10 pt-3">
         <div className="text-[11px] font-semibold text-slate-300 mb-2">
-          NVIDIA FourCastNet {toBurmeseNumber(city.forecasts[city.forecasts.length - 1]?.leadHours ?? 0)} နာရီ ခန့်မှန်းချက် အဆင့်များ:
+          {modelId} {toBurmeseNumber(leadHours[leadHours.length - 1] ?? 0)} နာရီ ခန့်မှန်းချက် အဆင့်များ:
         </div>
-        <div className={city.forecasts.length > 8 ? 'flex gap-1 overflow-x-auto pb-1' : 'grid grid-cols-6 gap-1'}>
-          {city.forecasts.map((f, idx) => {
-            const isStepActive = idx === currentStepIndex;
+        <div className={leadHours.length > 8 ? 'flex gap-1 overflow-x-auto pb-1' : 'grid grid-cols-6 gap-1'}>
+          {leadHours.map((leadHour, idx) => {
+            const isStepActive = idx === currentStep;
             const win = getStepTimeWindow(validTimesUtc, idx);
+            const stepTemperature = weatherSeries?.temperatureC[idx];
             return (
               <div
-                key={`${f.leadHours}-${idx}`}
+                key={`${leadHour}-${idx}`}
                 className={`flex flex-col items-center justify-center rounded-lg px-1 py-1.5 text-center transition ${
-                  city.forecasts.length > 8 ? 'min-w-[3.6rem] shrink-0' : ''
+                  leadHours.length > 8 ? 'min-w-[3.6rem] shrink-0' : ''
                 } ${
                   isStepActive
                     ? 'bg-emerald-600 text-white font-bold ring-1 ring-emerald-400'
@@ -130,10 +226,12 @@ export const CityWeatherPopup3D: React.FC<CityWeatherPopup3DProps> = ({
                   {win?.dateLabel ?? '—'}
                 </span>
                 <span className="text-[8px] font-mono opacity-90 leading-tight">
-                  {win?.shortLabel ?? `${f.leadHours}h`}
+                  {win?.shortLabel ?? `${leadHour}h`}
                 </span>
                 <span className="text-xs font-semibold mt-0.5">
-                  {toBurmeseNumber(Math.round(f.temperatureC))}°
+                  {stepTemperature == null || !Number.isFinite(stepTemperature)
+                    ? '—'
+                    : `${toBurmeseNumber(Math.round(stepTemperature))}°`}
                 </span>
               </div>
             );
